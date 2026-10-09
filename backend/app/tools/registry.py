@@ -30,7 +30,7 @@ class ToolContext:
     user_ref: str
     emit: Callable[[str, dict[str, Any]], None]
     # Filled by tools so the orchestrator can report sources / escalation.
-    sources: list[str]
+    sources: dict[str, str]  # doc_id -> doc title
     escalated: list[str]
 
 

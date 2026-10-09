@@ -50,7 +50,7 @@ async def test_hybrid_search_is_persona_scoped_and_script_agnostic(container):
 
 
 async def test_vector_leg_fuses_with_bm25(container):
-    from app.rag.knowledge_base import KnowledgeBase
+    from app.rag.knowledge_base import KnowledgeBase, LocalHybridIndex
     from app.rag.vector import InMemoryVectorIndex
 
     class ToyEmbedder:
@@ -59,7 +59,7 @@ async def test_vector_leg_fuses_with_bm25(container):
         async def embed(self, texts, input_type):
             return [[1.0 if "төлбөр" in t else 0.0, 1.0 if "апп" in t else 0.0, 0.1] for t in texts]
 
-    kb = KnowledgeBase(ToyEmbedder(), InMemoryVectorIndex())
+    kb = KnowledgeBase(LocalHybridIndex(ToyEmbedder(), InMemoryVectorIndex()))
     stats = await kb.rebuild(await container.all_docs())
     assert stats["embedded"] == stats["chunks"] > 0
     assert (await kb.rebuild(await container.all_docs()))["embedded"] == 0  # unchanged chunks reuse vectors

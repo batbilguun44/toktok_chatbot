@@ -18,7 +18,8 @@ class SearchKnowledgeIn(_Input):
 
 async def search_knowledge(ctx: ToolContext, a: SearchKnowledgeIn):
     hits = await ctx.kb.search(a.query, ctx.user.persona, k=ctx.settings.retrieval_top_k)
-    ctx.sources.extend(h.doc_id for h in hits if h.doc_id not in ctx.sources)
+    for h in hits:
+        ctx.sources.setdefault(h.doc_id, h.doc_title)
     if not hits:
         return {"results": [], "note": "No verified document covers this. Do not guess; offer escalation."}
     return {"results": [{"doc_id": h.doc_id, "title": h.title, "text": h.text} for h in hits]}

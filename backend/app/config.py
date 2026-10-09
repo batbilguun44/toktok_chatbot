@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     # Server-side refusal fallback (Claude API / Claude Platform on AWS only).
     llm_refusal_fallbacks: bool = True
 
+    # --- Search index ----------------------------------------------------
+    # qdrant  : BM25 sparse + dense vectors in Qdrant, fused server-side (default).
+    #           QDRANT_URL empty = embedded in-memory Qdrant (dev / tests only).
+    # pgvector: in-process BM25 + pgvector (needs DATABASE_URL for vectors).
+    # memory  : in-process BM25 + in-memory vectors (dev / tests only).
+    vector_store: Literal["qdrant", "pgvector", "memory"] = "qdrant"
+    qdrant_url: str | None = None
+    qdrant_api_key: str | None = None
+    qdrant_collection: str = "toktok_knowledge"
+
     # --- Embeddings (vector leg of hybrid search) ------------------------
     # "none" = BM25-only retrieval. "voyage" = Voyage AI multilingual embeddings.
     embedding_provider: Literal["none", "voyage"] = "none"

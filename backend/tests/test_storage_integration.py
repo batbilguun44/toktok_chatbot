@@ -18,7 +18,7 @@ async def test_postgres_repository_and_pgvector_index():
     from psycopg_pool import AsyncConnectionPool
 
     from app.memory.repository import PostgresRepository
-    from app.rag.knowledge_base import KnowledgeBase
+    from app.rag.knowledge_base import KnowledgeBase, LocalHybridIndex
     from app.rag.vector import PgVectorIndex
 
     async with AsyncConnectionPool(DB, min_size=1, max_size=2, open=False) as pool:
@@ -49,7 +49,7 @@ async def test_postgres_repository_and_pgvector_index():
             async def embed(self, texts, input_type):
                 return [[1.0 if "апп" in t else 0.0, 1.0 if "төлбөр" in t else 0.0, 0.1] for t in texts]
 
-        kb = KnowledgeBase(Toy(), PgVectorIndex(pool))
+        kb = KnowledgeBase(LocalHybridIndex(Toy(), PgVectorIndex(pool)))
         docs = await repo.list_docs() + [KnowledgeDoc("d2", "customer", "Хэрэглэгч", "захиалга")]
         assert (await kb.rebuild(docs))["embedded"] == 2
         assert (await kb.rebuild(docs))["embedded"] == 0
@@ -84,3 +84,61 @@ async def test_redis_session_store():
     key = f"k{time.time()}"
     assert [await store.hit_rate(key) for _ in range(3)] == [1, 2, 3]
     await r.aclose()
+
+
+QDRANT = os.getenv("TEST_QDRANT_URL")
+
+
+@pytest.mark.skipif(not QDRANT, reason="TEST_QDRANT_URL not set")
+async def test_qdrant_hybrid_index_shared_between_replicas():
+    from qdrant_client import AsyncQdrantClient
+
+    from app.rag.knowledge_base import KnowledgeBase
+    from app.rag.qdrant_index import QdrantHybridIndex
+
+    class Toy:
+        dim = 3
+
+        async def embed(self, texts, input_type):
+            return [[1.0 if "апп" in t else 0.0, 1.0 if "төлбөр" in t else 0.0, 0.1] for t in texts]
+
+    col = f"test_{int(time.time() * 1000)}"
+    a_client, b_client = AsyncQdrantClient(url=QDRANT), AsyncQdrantClient(url=QDRANT)
+    try:
+        # Two "replicas" sharing one Qdrant collection.
+        replica_a = KnowledgeBase(QdrantHybridIndex(a_client, col, Toy(), 3))
+        replica_b = KnowledgeBase(QdrantHybridIndex(b_client, col, Toy(), 3))
+        docs = [
+            KnowledgeDoc("d-app", "driver", "Апп", "## Алдаа\nапп ажиллахгүй үед дахин нээ"),
+            KnowledgeDoc("d-fee", "driver", "Төлбөр", "## Тооцоо\nхүргэлтийн төлбөр бодогдох"),
+            KnowledgeDoc("c-order", "customer", "Захиалга", "захиалга хаана явж байна"),
+        ]
+        stats = await replica_a.rebuild(docs)
+        assert stats["upserted"] == 3 and stats["embedded"] == 3
+        assert (await replica_a.rebuild(docs))["upserted"] == 0  # unchanged: no re-embedding
+
+        hits = await replica_b.search("app ajillahgui", "driver", 3)  # Latin query, other replica
+        assert hits[0].doc_id == "d-app" and hits[0].matched_by == ["bm25", "vector"]
+        assert all(h.doc_id != "c-order" for h in await replica_b.search("захиалга", "driver", 5))
+
+        # Admin edit on replica A is immediately searchable from replica B.
+        docs.append(KnowledgeDoc("d-winter", "driver", "Өвөл", "мөстэй зам дээр хурдаа сааруул"))
+        await replica_a.rebuild(docs)
+        assert (await replica_b.search("mostei zam", "driver", 1))[0].doc_id == "d-winter"
+
+        # Removing a doc removes its points; moving persona re-indexes it.
+        docs = [d for d in docs if d.id != "d-fee"]
+        docs[0] = KnowledgeDoc("d-app", "all", "Апп", docs[0].body)
+        stats = await replica_a.rebuild(docs)
+        assert stats["removed"] == 1 and stats["upserted"] == 1
+        assert (await replica_b.search("апп ажиллахгүй", "customer", 1))[0].doc_id == "d-app"
+
+        # Switching embeddings off recreates the collection as sparse-only.
+        sparse_only = KnowledgeBase(QdrantHybridIndex(a_client, col, None, 3))
+        await sparse_only.index.ensure_collection()
+        assert (await sparse_only.rebuild(docs))["upserted"] == len(docs)
+        assert (await sparse_only.search("апп", "driver", 1))[0].matched_by == ["bm25"]
+    finally:
+        await a_client.delete_collection(col)
+        await a_client.close()
+        await b_client.close()

@@ -68,7 +68,7 @@ class TurnState(TypedDict, total=False):
     blocked: str | None
     hits: list[SearchHit]
     result: TurnResult
-    sources: list[str]
+    sources: dict[str, str]
     escalations: list[str]
     started: float
     trace: Observation
@@ -122,7 +122,7 @@ def build_graph(svc: Services):
 
     async def agent(st: TurnState) -> TurnState:
         user, session = st["user"], st["session"]
-        sources = list(dict.fromkeys(h.doc_id for h in st["hits"]))
+        sources = {h.doc_id: h.doc_title for h in st["hits"]}
         escalations: list[str] = []
         ctx = ToolContext(
             user=user, session=session, gateway=svc.gateway, repo=svc.repo, kb=svc.kb, settings=s,
@@ -166,10 +166,9 @@ def build_graph(svc: Services):
         session.turn_index += 1
         await svc.sessions.save(session)
 
-        sources = st.get("sources") or []
+        sources = st.get("sources") or {}
         if sources:
-            docs = [svc.kb.docs[d] for d in sources if d in svc.kb.docs]
-            emit("sources", {"documents": [{"id": d.id, "title": d.title} for d in docs]})
+            emit("sources", {"documents": [{"id": i, "title": t} for i, t in sources.items()]})
 
         d = st.get("decision")
         latency = int((time.time() - st["started"]) * 1000)
@@ -180,7 +179,7 @@ def build_graph(svc: Services):
                 bot_text=redact_for_logs(result.text), intent=d.intent if d else None,
                 intent_confidence=d.confidence if d else None, route_source=st.get("route_source"),
                 safety=st.get("blocked") or (d.safety if d else None), tool_calls=result.tool_calls,
-                sources=sources, stop=result.stop, model=result.model, latency_ms=latency,
+                sources=list(sources), stop=result.stop, model=result.model, latency_ms=latency,
                 usage=result.usage, escalated=bool(st.get("escalations")),
             )
         )

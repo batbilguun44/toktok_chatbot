@@ -13,8 +13,8 @@ from app.orchestrator.graph import Services
 from app.orchestrator.service import ChatService
 from app.rag.documents import KnowledgeDoc, load_directory
 from app.rag.embeddings import Embedder, VoyageEmbedder
-from app.rag.knowledge_base import KnowledgeBase
-from app.rag.vector import InMemoryVectorIndex, PgVectorIndex, VectorIndex
+from app.rag.knowledge_base import KnowledgeBase, LocalHybridIndex, SearchIndex
+from app.rag.vector import InMemoryVectorIndex, PgVectorIndex
 from app.tools.definitions import build_registry
 from app.tools.gateway import MockTokTokGateway
 
@@ -55,6 +55,28 @@ def _make_llm(s: Settings) -> LLMProvider:
     return AnthropicProvider(s)
 
 
+async def _make_index(s: Settings, embedder: Embedder | None, pool, closers: list) -> SearchIndex:
+    if s.vector_store == "qdrant":
+        from qdrant_client import AsyncQdrantClient
+
+        from app.rag.qdrant_index import QdrantHybridIndex
+
+        if s.qdrant_url:
+            client = AsyncQdrantClient(url=s.qdrant_url, api_key=s.qdrant_api_key)
+        else:
+            log.warning("QDRANT_URL not set: using embedded in-memory Qdrant (dev / tests only)")
+            client = AsyncQdrantClient(location=":memory:")
+        closers.append(client.close)
+        index = QdrantHybridIndex(client, s.qdrant_collection, embedder, s.embedding_dim)
+        await index.ensure_collection()
+        return index
+    if s.vector_store == "pgvector":
+        if embedder and not pool:
+            raise RuntimeError("VECTOR_STORE=pgvector requires DATABASE_URL")
+        return LocalHybridIndex(embedder, PgVectorIndex(pool) if pool else None)
+    return LocalHybridIndex(embedder, InMemoryVectorIndex())
+
+
 async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Container:
     if s.env == "prod":
         if s.admin_api_key in ("change-me", "") or s.user_ref_salt in ("change-me-too", ""):
@@ -64,7 +86,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     closers = []
 
     repo: Repository
-    vectors: VectorIndex | None = None
+    pool = None
     if s.database_url:
         from psycopg_pool import AsyncConnectionPool
 
@@ -73,7 +95,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         closers.append(pool.close)
         pg = PostgresRepository(pool, s.embedding_dim)
         await pg.init_schema()
-        repo, vectors = pg, PgVectorIndex(pool)
+        repo = pg
     else:
         repo = InMemoryRepository()
 
@@ -92,7 +114,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         if not s.voyage_api_key:
             raise RuntimeError("EMBEDDING_PROVIDER=voyage requires VOYAGE_API_KEY")
         embedder = VoyageEmbedder(s.voyage_api_key, s.voyage_model, s.embedding_dim)
-        vectors = vectors or InMemoryVectorIndex()
+    index = await _make_index(s, embedder, pool, closers)
 
     tracer: Tracer = NoopTracer()
     if s.langfuse_public_key and s.langfuse_secret_key:
@@ -101,7 +123,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     services = Services(
         settings=s,
         llm=llm or _make_llm(s),
-        kb=KnowledgeBase(embedder, vectors),
+        kb=KnowledgeBase(index),
         tools=build_registry(),
         gateway=MockTokTokGateway(),
         repo=repo,

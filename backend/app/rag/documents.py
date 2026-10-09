@@ -36,10 +36,13 @@ class Chunk:
     persona: str
     title: str
     text: str
+    doc_title: str = ""
 
     @property
     def content_hash(self) -> str:
-        return hashlib.sha256(f"{self.title}\n{self.text}".encode()).hexdigest()[:32]
+        """Changes whenever anything stored in the index changes."""
+        raw = f"{self.persona}\n{self.doc_title}\n{self.title}\n{self.text}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def parse_markdown(raw: str, *, default_id: str, default_persona: str, source: str = "file") -> KnowledgeDoc:
@@ -91,7 +94,9 @@ def chunk_doc(doc: KnowledgeDoc, max_chars: int = 900) -> list[Chunk]:
 
 
 def _mk(doc: KnowledgeDoc, title: str, text: str, idx: int) -> Chunk:
-    return Chunk(id=f"{doc.id}#{idx}", doc_id=doc.id, persona=doc.persona, title=title, text=text.strip())
+    return Chunk(
+        id=f"{doc.id}#{idx}", doc_id=doc.id, persona=doc.persona, title=title, text=text.strip(), doc_title=doc.title
+    )
 
 
 def _first_heading(body: str) -> str | None:

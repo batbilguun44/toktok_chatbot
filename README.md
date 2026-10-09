@@ -16,10 +16,11 @@ TokTok（www.toktok.mn, フードデリバリー）のアプリ・Web に埋め�
         - 意図分類: Claude Haiku 5.5（Structured Outputs）→ 失敗時はキーワードルーター
         - ラテン文字モンゴル語 → キリル文字の検索クエリに正規化
    ② エージェント推論: Claude Opus 5.5 + Tool Use（ストリーミング・ツールループ）
-        ├─ ナレッジ検索: ハイブリッド RAG（BM25 + ベクトル、RRF 融合）
+        ├─ ナレッジ検索: Qdrant ハイブリッド検索（BM25 スパース + 密ベクトル、サーバー側 RRF 融合）
         └─ 外部 API 実行: 注文状況、住所変更、受取方法変更、加盟店リクエスト、オペレーター転送
    ③ セッション・メモリ: Redis（会話履歴・ロック・レート制限）
-                         PostgreSQL + pgvector（ログ・フィードバック・エスカレーション・ナレッジ・埋め込み）
+                         PostgreSQL（ログ・フィードバック・エスカレーション・ナレッジ本文）
+                         Qdrant（検索索引。全レプリカで共有）
         │
 [基盤モデル]  Claude（Anthropic 公式 SDK）。LLM 層は LLMProvider インターフェースで差し替え可能
         │
@@ -103,7 +104,7 @@ cd frontend && npm install && npm run dev
 ```bash
 cd backend
 pytest -q                                   # ユニット + API（Claude SDK はモック HTTP で実 SDK を通す）
-TEST_DATABASE_URL=postgresql://... TEST_REDIS_URL=redis://... pytest -q   # PostgreSQL/pgvector・Redis 結合テスト
+TEST_DATABASE_URL=postgresql://... TEST_REDIS_URL=redis://... TEST_QDRANT_URL=http://localhost:6333 pytest -q   # 結合テスト
 python -m evals.run_eval                     # 実際の Claude で RFP シナリオ 24 件を評価（API キー必要・課金あり）
 python -m evals.run_eval --only cli-         # 加盟店ケースのみ
 ```
@@ -129,7 +130,8 @@ python -m evals.run_eval --only cli-         # 加盟店ケースのみ
 - **プロンプトキャッシュ**: システムプロンプトとツール定義をペルソナごとに固定し、自動キャッシュを有効化。ターンごとの情報（検索結果・時刻・ルーティング結果）は会話途中の `role: "system"` メッセージとして追記し、プレフィックスを壊さない。
 - **履歴は追記のみ**: Opus 5.5 の thinking ブロックは直前までの会話に紐づくため、過去ターンを書き換えない。長い会話（既定 20 ターン超）は境界で一度だけ thinking を除去して切り詰め。
 - **拒否時のフォールバック**: `fallbacks: "default"`（サーバー側で推奨モデルに自動再実行）。Bedrock / Vertex では `LLM_REFUSAL_FALLBACKS=false`。
-- **埋め込み**: Claude には埋め込み API がないため、ベクトル検索は Voyage AI（`EMBEDDING_PROVIDER=voyage`）。未設定時は BM25 のみで動作。
+- **検索索引（Qdrant）**: キーワード検索はラテン/キリル表記を同一キーにそろえた独自特徴量をスパースベクトル化し、Qdrant の IDF で BM25 を計算。密ベクトルと 1 回のクエリで RRF 融合します。索引が全レプリカ共有なので、管理画面での編集は即座に全サーバーへ反映されます。`VECTOR_STORE=pgvector` で従来方式にも切替可能。
+- **埋め込み**: Claude には埋め込み API がないため、ベクトル検索は Voyage AI（`EMBEDDING_PROVIDER=voyage`）。未設定時はキーワード検索（BM25）のみで動作。
 
 ## 未検証の点・次のステップ
 

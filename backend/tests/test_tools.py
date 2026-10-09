@@ -16,7 +16,7 @@ async def ctx_factory(container):
         ctx = ToolContext(
             user=user, session=session, gateway=container.services.gateway, repo=container.services.repo,
             kb=container.services.kb, settings=container.settings, user_ref="ref",
-            emit=lambda k, d: events.append((k, d)), sources=[], escalated=[],
+            emit=lambda k, d: events.append((k, d)), sources={}, escalated=[],
         )
         return ctx, events
 
