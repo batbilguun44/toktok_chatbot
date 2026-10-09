@@ -37,11 +37,18 @@ class Chunk:
     title: str
     text: str
     doc_title: str = ""
+    # Contextual Retrieval: a short LLM-written description of where this chunk sits in
+    # its document, prepended for indexing only (the model still reads `text`).
+    context: str = ""
+
+    @property
+    def index_text(self) -> str:
+        return f"{self.context}\n{self.title}\n{self.text}" if self.context else f"{self.title}\n{self.text}"
 
     @property
     def content_hash(self) -> str:
         """Changes whenever anything stored in the index changes."""
-        raw = f"{self.persona}\n{self.doc_title}\n{self.title}\n{self.text}"
+        raw = f"{self.persona}\n{self.doc_title}\n{self.context}\n{self.title}\n{self.text}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 

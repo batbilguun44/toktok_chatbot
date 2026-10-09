@@ -11,7 +11,8 @@ from app.config import get_settings
 @pytest.fixture
 def client(monkeypatch):
     for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "ADMIN_API_KEY": "test-admin",
-                 "EMBEDDING_PROVIDER": "none", "LANGFUSE_PUBLIC_KEY": "", "RATE_LIMIT_PER_MINUTE": "5"}.items():
+                 "EMBEDDING_PROVIDER": "none", "LANGFUSE_PUBLIC_KEY": "", "RATE_LIMIT_PER_MINUTE": "5",
+                 "STAFF_SESSION_SECRET": "s" * 40, "JUDGE_SAMPLE_RATE": "0"}.items():
         monkeypatch.setenv(k, v)
     get_settings.cache_clear()
     from app.main import create_app
@@ -73,16 +74,92 @@ def test_auth_and_rate_limit(client):
     assert ev[0]["type"] == "error" and ev[0]["data"]["code"] == "rate_limited"
 
 
-def test_operation_team_can_update_knowledge(client):
-    h = {"X-Admin-Key": "test-admin"}
+def staff_login(client, email, roles):
+    r = client.post("/api/auth/dev-login", json={"email": email, "roles": roles})
+    assert r.status_code == 200, r.text
+    return {"X-Requested-With": "toktok-admin"}
+
+
+def test_cms_workflow_end_to_end(client):
+    # Editor drafts and submits; approver publishes; chatbot search sees it immediately.
+    h = staff_login(client, "editor@toktok.mn", ["editor"])
     body = {"persona": "driver", "title": "Өвлийн улиралд ажиллах заавар",
             "body": "## Гулгаа\nӨвлийн улиралд мөстэй зам дээр хурдаа 30 км/ц-аас хэтрүүлэхгүй."}
-    r = client.put("/api/admin/knowledge/driver-winter", json=body, headers=h)
-    assert r.status_code == 200 and r.json()["index"]["docs"] == 17
-    hits = client.post("/api/admin/knowledge/search", json={"query": "mostei zam hurd", "persona": "driver"},
+    assert client.put("/api/admin/kb/driver-winter/draft", json=body).status_code == 403  # CSRF header missing
+    v = client.put("/api/admin/kb/driver-winter/draft", json=body, headers=h).json()
+    assert v["state"] == "draft" and v["version"] == 1
+    assert client.post("/api/admin/kb/driver-winter/submit", headers=h).json()["state"] == "in_review"
+    assert client.post("/api/admin/kb/driver-winter/versions/1/approve", json={}, headers=h).status_code == 403
+
+    h = staff_login(client, "lead@toktok.mn", ["approver"])
+    review = client.get("/api/admin/kb/review").json()
+    assert [r["draft"]["doc_id"] for r in review] == ["driver-winter"]
+    assert client.post("/api/admin/kb/driver-winter/versions/1/approve", json={"comment": "ok"},
+                       headers=h).json()["state"] == "published"
+    hits = client.post("/api/admin/kb-search", json={"query": "mostei zam hurd", "persona": "driver"},
                        headers=h).json()
     assert hits[0]["doc_id"] == "driver-winter"
-    docs = client.get("/api/admin/knowledge", headers=h).json()
-    assert any(d["id"] == "driver-ops-internal" and not d["indexed"] for d in docs)
-    assert client.delete("/api/admin/knowledge/driver-winter", headers=h).json()["index"]["docs"] == 16
-    assert client.delete("/api/admin/knowledge/driver-fees", headers=h).status_code == 404  # file-based
+
+    # Seeded Git docs are published v1; archive hides them, restore brings them back.
+    assert client.post("/api/admin/kb/driver-fees/archive", headers=h).status_code == 200
+    ids = [x["doc_id"] for x in client.post("/api/admin/kb-search", json={"query": "төлбөр бонус",
+                                                                          "persona": "driver"}, headers=h).json()]
+    assert "driver-fees" not in ids
+    assert client.post("/api/admin/kb/driver-fees/restore", headers=h).status_code == 200
+    overview = client.get("/api/admin/kb").json()
+    assert overview["modes"]["driver"] in ("full", "rag")
+    assert any(d["id"] == "driver-fees" and d["status"] == "active" for d in overview["docs"])
+
+    # Audit trail (admin) records who did what.
+    staff_login(client, "admin@toktok.mn", ["admin"])
+    actions = [a["action"] for a in client.get("/api/admin/audit").json()]
+    assert {"kb.save_draft", "kb.submit", "kb.approve", "kb.archive", "kb.restore"} <= set(actions)
+
+
+def test_kb_import_csv_and_preview(client):
+    h = staff_login(client, "editor@toktok.mn", ["editor"])
+    csv = ("id,persona,question,answer,tags\n"
+           'customer-promo-expired,customer,Промо код ажиллахгүй байна,"## Шалгах\n1. Кодын хугацааг шалгана.",промо\n'
+           ",customer,Хоол хүйтэн ирсэн,Оператор шалгаж шийднэ. Захиалгын дугаараа бэлдээрэй.,гомдол\n"
+           "bad id!,customer,x,y,\n")
+    r = client.post("/api/admin/kb-import", files={"file": ("faq.csv", csv.encode(), "text/csv")}, headers=h).json()
+    assert r["created"] == ["customer-promo-expired", "customer-hool-huiten-irsen"]
+    assert r["errors"][0]["row"] == 4
+    review = client.get("/api/admin/kb/review").json()
+    assert {x["draft"]["doc_id"] for x in review} >= set(r["created"])
+    p = client.post("/api/admin/kb-preview", json={"persona": "customer", "question": "Промо код ажиллахгүй",
+                                                    "doc_id": "customer-promo-expired"}, headers=h).json()
+    assert p["overlay"]["doc_id"] == "customer-promo-expired" and p["answer"]
+
+
+def test_operator_handoff_round_trip(client):
+    ev = chat(client, "demo-customer", "operatortoi holbogdmoor baina")
+    sid = ev[0]["data"]["session_id"]
+    esc = next(e for e in ev if e["type"] == "escalation")["data"]
+    assert esc["mode"] == "inchat"
+
+    # While the handoff is open, the user's messages go to the operator, not the bot.
+    ev = chat(client, "demo-customer", "Захиалга O-24001 хоцорч байна", session_id=sid)
+    assert [e["type"] for e in ev] == ["meta", "handoff", "done"]
+
+    h = staff_login(client, "op@toktok.mn", ["operator"])
+    queue = client.get("/api/operator/queue").json()
+    assert [q["id"] for q in queue] == [esc["ticket_id"]]
+    detail = client.get(f"/api/operator/handoffs/{esc['ticket_id']}").json()
+    assert any(m["sender"] == "user" and "O-24001" in m["text"] for m in detail["messages"])
+    assert detail["transcript"][0]["text"] == "operatortoi holbogdmoor baina"
+    assert client.post(f"/api/operator/handoffs/{esc['ticket_id']}/claim", headers=h).status_code == 200
+    client.post(f"/api/operator/handoffs/{esc['ticket_id']}/messages", json={"text": "Шалгаж байна, 5 минут."},
+                headers=h)
+
+    poll = client.get("/api/chat/handoff", params={"session_id": sid},
+                      headers={"Authorization": "Bearer demo-customer"}).json()
+    assert poll["active"] and any(m["sender"] == "operator" and "5 минут" in m["text"] for m in poll["messages"])
+    # Another user cannot read it.
+    assert client.get("/api/chat/handoff", params={"session_id": sid},
+                      headers={"Authorization": "Bearer demo-driver"}).status_code == 403
+
+    client.post(f"/api/operator/handoffs/{esc['ticket_id']}/resolve", json={"note": "Хүргэгчтэй холбогдсон"},
+                headers=h)
+    ev = chat(client, "demo-customer", "Баярлалаа", session_id=sid)
+    assert any(e["type"] == "text" for e in ev)  # the bot is back

@@ -45,11 +45,12 @@ class AnthropicProvider:
         self.client = client or anthropic.AsyncAnthropic()
 
     # ------------------------------------------------------------------ classify
-    async def classify(self, *, system: str, user: str, schema: type[SchemaT]) -> SchemaT:
+    async def classify(self, *, system: str, user: str, schema: type[SchemaT], model: str | None = None,
+                       max_tokens: int = 4096) -> SchemaT:
         try:
             resp = await self.client.messages.parse(
-                model=self.settings.classifier_model,
-                max_tokens=4096,
+                model=model or self.settings.classifier_model,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 output_format=schema,
@@ -60,6 +61,22 @@ class AnthropicProvider:
         if resp.stop_reason == "refusal" or resp.parsed_output is None:
             raise LLMError(f"classifier returned no parsed output (stop_reason={resp.stop_reason})")
         return resp.parsed_output
+
+    async def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
+        try:
+            resp = await self.client.messages.create(
+                model=self.settings.classifier_model,
+                max_tokens=max_tokens,
+                # The (large, repeated) system part is cached across calls.
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user}],
+                output_config={"effort": "low"},
+            )
+        except anthropic.APIError as e:
+            raise LLMError(f"completion failed: {e}") from e
+        if resp.stop_reason == "refusal":
+            raise LLMError("completion refused")
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
 
     # ------------------------------------------------------------------ run_turn
     async def run_turn(
@@ -145,7 +162,8 @@ class AnthropicProvider:
                 outcomes = await asyncio.gather(*(execute_tool(u["name"], u.get("input") or {}) for u in uses))
                 results = []
                 for u, out in zip(uses, outcomes):
-                    tool_calls.append({"name": u["name"], "input": u.get("input"), "is_error": out.is_error})
+                    tool_calls.append({"name": u["name"], "input": u.get("input"), "is_error": out.is_error,
+                                       "output": out.content[:1500]})
                     results.append(
                         {
                             "type": "tool_result",
@@ -214,9 +232,12 @@ class AnthropicProvider:
         starts = [i for i, m in enumerate(history) if _is_user_turn_start(m)]
         if len(starts) <= keep_turns:
             return history
-        kept = history[starts[-keep_turns]:]
+        return self.reset_reasoning(history[starts[-keep_turns]:])
+
+
+    def reset_reasoning(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out = []
-        for m in kept:
+        for m in history:
             if m["role"] == "assistant" and isinstance(m["content"], list):
                 blocks = [b for b in m["content"] if b.get("type") not in ("thinking", "redacted_thinking")]
                 m = {"role": "assistant", "content": blocks or [{"type": "text", "text": "…"}]}

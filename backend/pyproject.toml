@@ -17,6 +17,9 @@ dependencies = [
     "httpx>=0.28",
     "pyyaml>=6.0",
     "qdrant-client>=1.15",
+    "pyjwt[crypto]>=2.9",
+    "openpyxl>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

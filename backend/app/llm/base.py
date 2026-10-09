@@ -54,8 +54,13 @@ class TurnResult:
 class LLMProvider(Protocol):
     name: str
 
-    async def classify(self, *, system: str, user: str, schema: type[SchemaT]) -> SchemaT:
-        """Single structured-output call (intent routing, safety labels)."""
+    async def classify(self, *, system: str, user: str, schema: type[SchemaT], model: str | None = None,
+                       max_tokens: int = 4096) -> SchemaT:
+        """Single structured-output call (routing, judging, clustering). Defaults to the fast model."""
+        ...
+
+    async def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
+        """Small plain-text generation with the fast model (indexing helpers)."""
         ...
 
     async def run_turn(
@@ -78,4 +83,8 @@ class LLMProvider(Protocol):
 
     def trim_history(self, history: list[dict[str, Any]], keep_turns: int) -> list[dict[str, Any]]:
         """Shorten a long history at a turn boundary in a provider-safe way."""
+        ...
+
+    def reset_reasoning(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop provider reasoning state bound to the old system prompt (one-time recovery)."""
         ...

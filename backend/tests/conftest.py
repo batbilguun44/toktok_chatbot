@@ -9,7 +9,8 @@ def settings() -> Settings:
     return Settings(
         _env_file=None, env="test", llm_provider="fake", database_url=None, redis_url=None,
         embedding_provider="none", langfuse_public_key=None, langfuse_secret_key=None,
-        admin_api_key="test-admin", rate_limit_per_minute=1000,
+        admin_api_key="test-admin", rate_limit_per_minute=1000, staff_session_secret="t" * 40,
+        judge_sample_rate=0.0,
     )
 
 

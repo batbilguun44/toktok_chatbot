@@ -17,6 +17,7 @@ async def ctx_factory(container):
             user=user, session=session, gateway=container.services.gateway, repo=container.services.repo,
             kb=container.services.kb, settings=container.settings, user_ref="ref",
             emit=lambda k, d: events.append((k, d)), sources={}, escalated=[],
+            handoff=container.services.handoff,
         )
         return ctx, events
 
@@ -85,7 +86,9 @@ async def test_escalation_creates_ticket_and_emits_event(container, ctx_factory)
     _, body = await run(container, ctx, "escalate_to_human",
                         {"category": "incident", "summary": "Хүргэгч бага зэргийн осолд орсон, захиалга O-24001."})
     assert body["ticket_id"].startswith("esc_") and body["operator_phone"] == container.settings.operator_phone_driver
-    assert ("escalation", {"ticket_id": body["ticket_id"], "phone": body["operator_phone"], "category": "incident"}) in events
+    assert ("escalation", {"ticket_id": body["ticket_id"], "phone": body["operator_phone"], "category": "incident",
+                           "mode": "inchat"}) in events
+    assert ctx.session.handoff_id == body["ticket_id"]  # next user messages go to the operator
     assert ctx.session.escalated
-    rows = await container.services.repo.list_escalations("open", 10)
+    rows = await container.services.repo.list_escalations("queued", 10)
     assert rows[0]["category"] == "incident"

@@ -60,8 +60,9 @@ async def test_vector_leg_fuses_with_bm25(container):
             return [[1.0 if "төлбөр" in t else 0.0, 1.0 if "апп" in t else 0.0, 0.1] for t in texts]
 
     kb = KnowledgeBase(LocalHybridIndex(ToyEmbedder(), InMemoryVectorIndex()))
-    stats = await kb.rebuild(await container.all_docs())
+    docs = await container.cms.published_docs()
+    stats = await kb.rebuild(docs)
     assert stats["embedded"] == stats["chunks"] > 0
-    assert (await kb.rebuild(await container.all_docs()))["embedded"] == 0  # unchanged chunks reuse vectors
+    assert (await kb.rebuild(docs))["embedded"] == 0  # unchanged chunks reuse vectors
     hits = await kb.search("апп", "driver", 3)
     assert "vector" in hits[0].matched_by

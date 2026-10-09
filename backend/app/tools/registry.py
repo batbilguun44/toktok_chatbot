@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -15,6 +15,9 @@ from app.memory.repository import Repository
 from app.memory.session import SessionState
 from app.rag.knowledge_base import KnowledgeBase
 from app.tools.gateway import GatewayError, TokTokGateway
+
+if TYPE_CHECKING:
+    from app.handoff.service import HandoffService
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +35,7 @@ class ToolContext:
     # Filled by tools so the orchestrator can report sources / escalation.
     sources: dict[str, str]  # doc_id -> doc title
     escalated: list[str]
+    handoff: "HandoffService | None" = None
 
 
 Handler = Callable[[ToolContext, Any], Awaitable[dict[str, Any]]]

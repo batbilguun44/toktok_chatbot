@@ -10,16 +10,21 @@
 """
 
 import asyncio
+import hashlib
 import logging
 import math
 from collections import Counter
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from app.guardrails.translit import key_tokens
 from app.rag.documents import Chunk, KnowledgeDoc, chunk_doc
 from app.rag.embeddings import Embedder
 from app.rag.vector import VectorIndex
+
+if TYPE_CHECKING:
+    from app.rag.contextual import Contextualizer
+    from app.rag.rerank import Reranker
 
 log = logging.getLogger(__name__)
 
@@ -52,26 +57,95 @@ class SearchIndex(Protocol):
     async def search(self, query: str, personas: list[str], k: int) -> list[SearchHit]: ...
 
 
+PERSONA_KEYS = ("driver", "client", "customer")
+
+
+@dataclass
+class KnowledgePack:
+    """Everything one persona may know, rendered for the system prompt (full-context mode)."""
+
+    id: str
+    persona: str
+    docs: dict[str, tuple[str, str]] = field(default_factory=dict)  # doc_id -> (title, body)
+    text: str = ""
+    est_tokens: int = 0
+
+    @classmethod
+    def build(cls, persona: str, docs: list[KnowledgeDoc]) -> "KnowledgePack":
+        mine = {d.id: (d.title, d.body) for d in sorted(docs, key=lambda d: d.id) if d.persona in (persona, "all")}
+        text = render_docs(mine)
+        # Conservative estimate for Cyrillic Mongolian; only used to choose the mode.
+        return cls(id=hashlib.sha256(text.encode()).hexdigest()[:20], persona=persona, docs=mine, text=text,
+                   est_tokens=len(text) // 2)
+
+    def to_json(self) -> dict:
+        return {"id": self.id, "persona": self.persona, "docs": {k: list(v) for k, v in self.docs.items()}}
+
+    @classmethod
+    def from_json(cls, d: dict) -> "KnowledgePack":
+        docs = {k: (v[0], v[1]) for k, v in d["docs"].items()}
+        text = render_docs(docs)
+        return cls(id=d["id"], persona=d["persona"], docs=docs, text=text, est_tokens=len(text) // 2)
+
+
+def render_docs(docs: dict[str, tuple[str, str]]) -> str:
+    parts = [f'<doc id="{i}" title="{t}">\n{b}\n</doc>' for i, (t, b) in docs.items()]
+    return "<knowledge_base>\n" + "\n".join(parts) + "\n</knowledge_base>"
+
+
+def diff_packs(old: KnowledgePack, new: KnowledgePack) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """(added or changed docs, removed doc titles)."""
+    changed = {i: v for i, v in new.docs.items() if old.docs.get(i) != v}
+    removed = [old.docs[i][0] for i in old.docs if i not in new.docs]
+    return changed, removed
+
+
 class KnowledgeBase:
-    def __init__(self, index: SearchIndex):
+    def __init__(self, index: SearchIndex, *, mode: Literal["auto", "full", "rag"] = "auto",
+                 full_max_tokens: int = 50_000, reranker: "Reranker | None" = None,
+                 contextualizer: "Contextualizer | None" = None):
         self.index = index
+        self.mode = mode
+        self.full_max_tokens = full_max_tokens
+        self.reranker = reranker
+        self.contextualizer = contextualizer
         self.docs: dict[str, KnowledgeDoc] = {}
+        self.packs: dict[str, KnowledgePack] = {}  # persona -> current pack
+        self.pack_cache: dict[str, KnowledgePack] = {}  # pack id -> pack (incl. older ones)
         self._lock = asyncio.Lock()
 
     async def rebuild(self, docs: list[KnowledgeDoc]) -> dict[str, int]:
         """(Re)index all public docs. `visibility: internal` docs never reach the index."""
         async with self._lock:
             public = [d for d in docs if d.visibility != "internal"]
-            chunks = [c for d in public for c in chunk_doc(d)]
+            chunks: list[Chunk] = []
+            for d in public:
+                cs = chunk_doc(d)
+                if self.contextualizer:
+                    cs = await self.contextualizer.apply(d, cs)
+                chunks += cs
             stats = await self.index.sync(chunks)
             self.docs = {d.id: d for d in public}
-            stats = {"docs": len(public), "chunks": len(chunks), **stats}
+            self.packs = {p: KnowledgePack.build(p, public) for p in PERSONA_KEYS}
+            for pack in self.packs.values():
+                self.pack_cache[pack.id] = pack
+            stats = {"docs": len(public), "chunks": len(chunks), **stats,
+                     **{f"tokens_{p}": pk.est_tokens for p, pk in self.packs.items()}}
             log.info("knowledge indexed: %s", stats)
             return stats
+
+    def mode_for(self, persona: str) -> Literal["full", "rag"]:
+        if self.mode != "auto":
+            return self.mode
+        pack = self.packs.get(persona)
+        return "full" if pack and pack.est_tokens <= self.full_max_tokens else "rag"
 
     async def search(self, query: str, persona: str, k: int = 5) -> list[SearchHit]:
         if not query.strip():
             return []
+        if self.reranker:
+            candidates = await self.index.search(query, [persona, "all"], max(20, k * 4))
+            return await self.reranker.rerank(query, candidates, k)
         return await self.index.search(query, [persona, "all"], k)
 
 
@@ -120,13 +194,13 @@ class LocalHybridIndex:
 
     async def sync(self, chunks: list[Chunk]) -> dict[str, int]:
         self.chunks = {c.id: c for c in chunks}
-        self.bm25.build([(c.id, f"{c.title}\n{c.text}") for c in chunks])
+        self.bm25.build([(c.id, c.index_text) for c in chunks])
         embedded = 0
         if self.embedder and self.vectors:
             known = await self.vectors.known_hashes()
             stale = [c for c in chunks if known.get(c.id) != c.content_hash]
             if stale:
-                vecs = await self.embedder.embed([f"{c.title}\n{c.text}" for c in stale], "document")
+                vecs = await self.embedder.embed([c.index_text for c in stale], "document")
                 await self.vectors.upsert(stale, vecs)
                 embedded = len(stale)
             await self.vectors.retain(set(self.chunks))

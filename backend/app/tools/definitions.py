@@ -38,18 +38,26 @@ class EscalateIn(_Input):
 
 
 async def escalate_to_human(ctx: ToolContext, a: EscalateIn):
+    if ctx.session.handoff_id:
+        return {"status": "already_with_operator", "ticket_id": ctx.session.handoff_id}
+    inchat = ctx.settings.handoff_mode == "inchat" and ctx.handoff is not None
+    mode = "inchat" if inchat else "phone"
     ticket = await ctx.repo.create_escalation(
-        ctx.session.session_id, ctx.user.persona, ctx.user_ref, a.category, a.summary
+        ctx.session.session_id, ctx.user.persona, ctx.user_ref, a.category, a.summary, mode=mode
     )
     phone = ctx.settings.operator_phone(ctx.user.persona)
     ctx.session.escalated = True
     ctx.escalated.append(ticket)
-    ctx.emit("escalation", {"ticket_id": ticket, "phone": phone, "category": a.category})
-    return {
-        "ticket_id": ticket,
-        "operator_phone": phone,
-        "note": "Tell the user the ticket number and the phone number; an operator will follow up.",
-    }
+    if inchat:
+        ctx.session.handoff_id = ticket
+        await ctx.handoff.started(await ctx.repo.get_escalation(ticket), ctx.session.recent[-12:])
+    ctx.emit("escalation", {"ticket_id": ticket, "phone": phone, "category": a.category, "mode": mode})
+    if inchat:
+        note = ("An operator will continue in THIS chat. Tell the user briefly that they can keep writing "
+                "here and an operator will reply; give the ticket number; the phone is only for urgent cases.")
+    else:
+        note = "Tell the user the ticket number and the phone number; an operator will follow up."
+    return {"ticket_id": ticket, "operator_phone": phone, "mode": mode, "note": note}
 
 
 # ---------------------------------------------------------------- customer

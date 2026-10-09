@@ -21,8 +21,12 @@ class FakeProvider:
     name = "fake"
     supports_classify = False
 
-    async def classify(self, *, system: str, user: str, schema: type[SchemaT]) -> SchemaT:
+    async def classify(self, *, system: str, user: str, schema: type[SchemaT], model: str | None = None,
+                       max_tokens: int = 4096) -> SchemaT:
         raise LLMError("fake provider has no classifier; keyword routing is used")
+
+    async def complete(self, *, system: str, user: str, max_tokens: int = 1024) -> str:
+        return ""
 
     async def run_turn(
         self,
@@ -43,7 +47,7 @@ class FakeProvider:
         async def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
             emit("tool", {"name": name, "state": "start"})
             out = await execute_tool(name, args)
-            calls.append({"name": name, "input": args, "is_error": out.is_error})
+            calls.append({"name": name, "input": args, "is_error": out.is_error, "output": out.content[:1500]})
             return json.loads(out.content)
 
         if intent == "greeting":
@@ -82,3 +86,6 @@ class FakeProvider:
 
     def trim_history(self, history: list[dict[str, Any]], keep_turns: int) -> list[dict[str, Any]]:
         return history[-2 * keep_turns :]
+
+    def reset_reasoning(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return history

@@ -21,6 +21,13 @@ class SessionState:
     scratch: dict[str, Any] = field(default_factory=dict)
     escalated: bool = False
     created_at: float = field(default_factory=time.time)
+    # Knowledge: "full" sessions carry a frozen knowledge pack in the system prompt;
+    # later edits arrive as appended updates (kb_applied_id = last pack delivered).
+    kb_mode: str | None = None
+    kb_pack_id: str | None = None
+    kb_applied_id: str | None = None
+    # Live human handoff: while set and open, user messages go to the operator, not the bot.
+    handoff_id: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -47,6 +54,12 @@ class SessionStore(Protocol):
         """Increment and return the request count for `key` in the current window."""
         ...
 
+    async def put_blob(self, key: str, value: str, ttl: int) -> None:
+        """Small shared values (knowledge packs, contextualization cache)."""
+        ...
+
+    async def get_blob(self, key: str) -> str | None: ...
+
 
 class InMemorySessionStore:
     def __init__(self, ttl_seconds: int):
@@ -54,6 +67,7 @@ class InMemorySessionStore:
         self._data: dict[str, tuple[float, str]] = {}
         self._locks: dict[str, float] = {}
         self._rates: dict[tuple[str, int], int] = {}
+        self._blobs: dict[str, tuple[float, str]] = {}
 
     async def get(self, session_id: str) -> SessionState | None:
         item = self._data.get(session_id)
@@ -79,6 +93,13 @@ class InMemorySessionStore:
         bucket = (key, int(time.time() // window_seconds))
         self._rates[bucket] = self._rates.get(bucket, 0) + 1
         return self._rates[bucket]
+
+    async def put_blob(self, key: str, value: str, ttl: int) -> None:
+        self._blobs[key] = (time.time() + ttl, value)
+
+    async def get_blob(self, key: str) -> str | None:
+        item = self._blobs.get(key)
+        return item[1] if item and item[0] > time.time() else None
 
 
 class RedisSessionStore:
@@ -107,3 +128,10 @@ class RedisSessionStore:
         if n == 1:
             await self.r.expire(k, window_seconds * 2)
         return int(n)
+
+    async def put_blob(self, key: str, value: str, ttl: int) -> None:
+        await self.r.set(f"toktok:blob:{key}", value, ex=ttl)
+
+    async def get_blob(self, key: str) -> str | None:
+        raw = await self.r.get(f"toktok:blob:{key}")
+        return raw.decode() if isinstance(raw, bytes) else raw

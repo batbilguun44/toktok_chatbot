@@ -35,13 +35,11 @@ async def test_postgres_repository_and_pgvector_index():
         assert await repo.add_feedback("t1", 1, None)
         assert not await repo.add_feedback("missing", 1, None)
         eid = await repo.create_escalation("s1", "customer", "u1", "user_requested", "summary text")
-        assert (await repo.list_escalations("open", 5))[0]["id"] == eid
+        assert (await repo.list_escalations("queued", 5))[0]["id"] == eid
         m = await repo.metrics(time.time() - 3600)
         assert m["conversations"] == 1 and m["turns"] == 2 and m["satisfaction"] == 1.0
         assert m["bot_resolution_rate"] == 0.0
 
-        await repo.upsert_doc(KnowledgeDoc("d1", "driver", "Тест", "## Хэсэг\nапп төлбөр"))
-        assert [d.id for d in await repo.list_docs()] == ["d1"]
 
         class Toy:
             dim = 3
@@ -50,7 +48,8 @@ async def test_postgres_repository_and_pgvector_index():
                 return [[1.0 if "апп" in t else 0.0, 1.0 if "төлбөр" in t else 0.0, 0.1] for t in texts]
 
         kb = KnowledgeBase(LocalHybridIndex(Toy(), PgVectorIndex(pool)))
-        docs = await repo.list_docs() + [KnowledgeDoc("d2", "customer", "Хэрэглэгч", "захиалга")]
+        docs = [KnowledgeDoc("d1", "driver", "Тест", "## Хэсэг\nапп төлбөр"),
+                KnowledgeDoc("d2", "customer", "Хэрэглэгч", "захиалга")]
         assert (await kb.rebuild(docs))["embedded"] == 2
         assert (await kb.rebuild(docs))["embedded"] == 0
         hits = await kb.search("апп", "driver", 3)
@@ -60,7 +59,6 @@ async def test_postgres_repository_and_pgvector_index():
         async with pool.connection() as conn:
             n = (await (await conn.execute("SELECT count(*) FROM knowledge_chunks")).fetchone())[0]
         assert n == 1
-        assert await repo.delete_doc("d1")
 
 
 @pytest.mark.skipif(not REDIS, reason="TEST_REDIS_URL not set")
@@ -142,3 +140,76 @@ async def test_qdrant_hybrid_index_shared_between_replicas():
         await a_client.delete_collection(col)
         await a_client.close()
         await b_client.close()
+
+
+@pytest.mark.skipif(not DB, reason="TEST_DATABASE_URL not set")
+async def test_postgres_cms_staff_handoff_judge_insights():
+    from psycopg_pool import AsyncConnectionPool
+
+    from app.cms.service import CMSService, DraftInput
+    from app.cms.store import PostgresKnowledgeStore
+    from app.memory.repository import PostgresRepository
+    from app.staff.auth import Principal
+    from app.staff.store import PostgresStaffStore, StaffUser, permissions_for
+
+    async with AsyncConnectionPool(DB, min_size=1, max_size=2, open=False) as pool:
+        async with pool.connection() as conn:
+            await conn.execute("DROP TABLE IF EXISTS feedback, judgements, handoff_messages, turns, conversations, "
+                               "escalations, knowledge_docs, knowledge_chunks, kb_docs, kb_versions, staff_users, "
+                               "audit_log, insight_runs CASCADE")
+        repo = PostgresRepository(pool, embedding_dim=3)
+        await repo.init_schema()
+        # A doc edited through the pre-CMS admin API is migrated once.
+        async with pool.connection() as conn:
+            await conn.execute("INSERT INTO knowledge_docs (id, persona, title, body) VALUES "
+                               "('legacy-doc', 'driver', 'Хуучин', 'Хуучин агуулга 123')")
+        store, staff = PostgresKnowledgeStore(pool), PostgresStaffStore(pool)
+        assert await store.migrate_legacy() == 1 and await store.migrate_legacy() == 0
+
+        await staff.upsert(StaffUser("Ed@TokTok.mn", "Ed", ["editor"]))
+        assert (await staff.get("ed@toktok.mn")).roles == ["editor"]
+        reindexed = []
+
+        async def on_publish():
+            reindexed.append(1)
+
+        cms = CMSService(store, staff, on_publish)
+        ed = Principal("ed@toktok.mn", ["editor"], permissions_for(["editor"]), "sso")
+        lead = Principal("lead@toktok.mn", ["approver"], permissions_for(["approver"]), "sso")
+        rev0 = await store.revision()
+        await cms.save_draft(ed, "driver-new", DraftInput("driver", "Шинэ", "Шинэ агуулга 12345", ["a"]))
+        v = await cms.submit(ed, "driver-new")
+        await cms.approve(lead, "driver-new", v.version, "ok")
+        assert reindexed and await store.revision() != rev0
+        docs = {d.id: d for d in await cms.published_docs()}
+        assert set(docs) == {"legacy-doc", "driver-new"} and docs["driver-new"].tags == ["a"]
+        await cms.save_draft(ed, "driver-new", DraftInput("driver", "Шинэ 2", "Хоёр дахь хувилбар 123", []))
+        overview = {r["id"]: r for r in await cms.overview()}
+        assert overview["driver-new"]["draft"]["version"] == 2 and overview["driver-new"]["published_version"] == 1
+        await cms.discard(ed, "driver-new")
+        await cms.rollback(lead, "legacy-doc", 1)
+        assert [v.state for v in await store.versions("legacy-doc")] == ["published", "superseded"]
+        assert {a["action"] for a in await staff.list_audit(50)} >= {"kb.approve", "kb.rollback", "kb.discard_draft"}
+
+        # Handoff queue
+        await repo.log_turn(TurnLog("t1", "s1", "customer", "u1", "promo", "?", "payment_refund", 0.9, "llm", "ok",
+                                    tool_calls=[{"name": "escalate_to_human", "input": {}}], escalated=True))
+        eid = await repo.create_escalation("s1", "customer", "u1", "complaint", "summary", mode="inchat")
+        assert (await repo.list_escalations("queued", 5))[0]["mode"] == "inchat"
+        assert await repo.claim(eid, "op@toktok.mn") and not await repo.claim(eid, "other@toktok.mn")
+        m1 = await repo.add_handoff_message(eid, "user", "сайн уу")
+        await repo.add_handoff_message(eid, "operator", "Туслъя", author="op@toktok.mn")
+        assert [m["sender"] for m in await repo.list_handoff_messages(eid, m1)] == ["operator"]
+        assert await repo.resolve(eid, "op@toktok.mn", "done") and not await repo.resolve(eid, "x", None)
+        assert (await repo.get_escalation(eid))["status"] == "resolved"
+
+        # Judge + improvement loop inputs
+        await repo.save_judgement("t1", {"grounded": "partial", "answered": True, "score": 3,
+                                         "unsupported_claims": ["x"], "rationale": "r", "model": "m"})
+        assert (await repo.list_judgements(True, 5))[0]["grounded"] == "partial"
+        cands = await repo.candidate_questions(time.time() - 3600, 10)
+        assert cands[0]["turn_id"] == "t1" and set(cands[0]["reasons"]) == {"escalated", "ungrounded"}
+        m = await repo.metrics(time.time() - 3600)
+        assert m["judged_answers"] == 1 and m["groundedness"] == 0.0
+        await repo.save_insight_run({"id": "run_1", "actor": "lead", "stats": {"drafts": 0}, "clusters": []})
+        assert (await repo.list_insight_runs(5))[0]["id"] == "run_1"

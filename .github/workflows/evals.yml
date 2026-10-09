@@ -1,0 +1,35 @@
+name: evals
+# Quality gate: runs the RFP scenario set against the real model when prompts,
+# knowledge, routing or tools change. Needs the ANTHROPIC_API_KEY repository secret.
+on:
+  pull_request:
+    paths:
+      - "backend/app/personas/**"
+      - "backend/app/routing/**"
+      - "backend/app/tools/**"
+      - "backend/app/orchestrator/**"
+      - "backend/app/llm/**"
+      - "backend/knowledge/**"
+      - "backend/evals/**"
+  workflow_dispatch:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -e .
+      - name: Skip when no API key is configured
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "ANTHROPIC_API_KEY secret not set; skipping model evals" && exit 0
+      - name: Run eval set (gate at 85% of cases)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: python -m evals.run_eval --provider anthropic --min-pass-rate 0.85
+      - uses: actions/upload-artifact@v4
+        if: always() && env.ANTHROPIC_API_KEY != ''
+        with: { name: eval-results, path: backend/evals/last_run.json }

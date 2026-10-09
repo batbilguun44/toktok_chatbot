@@ -19,6 +19,7 @@ class Observation(Protocol):
 class Tracer(Protocol):
     def start_turn(self, *, turn_id: str, session_id: str, user_ref: str, persona: str, input: Any) -> Observation: ...
     def score_feedback(self, *, turn_id: str, rating: int, comment: str | None) -> None: ...
+    def score_judgement(self, *, turn_id: str, grounded: str, score: int) -> None: ...
     def flush(self) -> None: ...
 
 
@@ -38,6 +39,9 @@ class NoopTracer:
         return _NoopObservation()
 
     def score_feedback(self, **kw: Any) -> None:
+        pass
+
+    def score_judgement(self, **kw: Any) -> None:
         pass
 
     def flush(self) -> None:
@@ -99,6 +103,14 @@ class LangfuseTracer:
             )
         except Exception as e:
             log.warning("langfuse score failed: %s", e)
+
+    def score_judgement(self, *, turn_id: str, grounded: str, score: int) -> None:
+        try:
+            trace_id = self.lf.create_trace_id(seed=turn_id)
+            self.lf.create_score(name="judge_grounded", value=grounded, data_type="CATEGORICAL", trace_id=trace_id)
+            self.lf.create_score(name="judge_score", value=float(score), data_type="NUMERIC", trace_id=trace_id)
+        except Exception as e:
+            log.warning("langfuse judge score failed: %s", e)
 
     def flush(self) -> None:
         self.lf.flush()

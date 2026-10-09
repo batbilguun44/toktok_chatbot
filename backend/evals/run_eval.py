@@ -36,6 +36,7 @@ async def run_case(case: dict, settings: Settings) -> dict:
                 if ev["type"] == "meta" and "intent" in ev["data"]:
                     intents.append(ev["data"]["intent"])
             await asyncio.sleep(0)
+        await c.services.drain()
         repo = c.services.repo
         all_tools = [t["name"] for log in repo.turns for t in log.tool_calls]
         answer = "".join(e["data"]["delta"] for e in events if e["type"] == "text")
@@ -65,9 +66,12 @@ async def main() -> None:
     ap.add_argument("--provider", choices=["anthropic", "fake"])
     ap.add_argument("--only", default="")
     ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--min-pass-rate", type=float, default=0.0,
+                    help="exit non-zero if the share of passing cases is below this (CI gate)")
     args = ap.parse_args()
 
-    overrides = {"database_url": None, "redis_url": None, "langfuse_public_key": None, "rate_limit_per_minute": 10_000}
+    overrides = {"database_url": None, "redis_url": None, "qdrant_url": None, "langfuse_public_key": None,
+                 "rate_limit_per_minute": 10_000, "judge_sample_rate": 0.0}
     if args.provider:
         overrides["llm_provider"] = args.provider
     settings = Settings(**overrides)
@@ -88,6 +92,10 @@ async def main() -> None:
     print(f"\ncases {sum(r['passed'] for r in results)}/{len(results)}   checks {ok_checks}/{n_checks}   "
           f"provider={settings.llm_provider} model={settings.agent_model} effort={settings.agent_effort}")
     (HERE / "last_run.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    rate = sum(r["passed"] for r in results) / max(len(results), 1)
+    if rate < args.min_pass_rate:
+        print(f"FAILED: pass rate {rate:.0%} < required {args.min_pass_rate:.0%}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

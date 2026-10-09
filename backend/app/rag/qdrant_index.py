@@ -105,7 +105,7 @@ class QdrantHybridIndex:
         wanted = {point_id(c.id): c for c in chunks}
         stale = [c for pid, c in wanted.items() if existing.get(pid, (None, None))[1] != c.content_hash]
         if stale:
-            texts = [f"{c.title}\n{c.text}" for c in stale]
+            texts = [c.index_text for c in stale]
             dense = await self.embedder.embed(texts, "document") if self.embedder else [None] * len(stale)
             points = []
             for c, text, vec in zip(stale, texts, dense):

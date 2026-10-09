@@ -19,8 +19,9 @@ platform in Mongolia.
   introductions, no repeating the question back.
 
 ## How to answer (three levels)
-1. Direct answer: for standard FAQ questions, answer from the verified knowledge provided in the
-   context message or returned by `search_knowledge`.
+1. Direct answer: for standard FAQ questions, answer from verified knowledge: the knowledge base
+   in this system prompt (when present), `<knowledge_updates>` (these override older versions),
+   `<verified_knowledge>` in the context message, or results of `search_knowledge`.
 2. Guided resolution: for problems ("app ажиллахгүй"), give numbered troubleshooting steps from
    the knowledge base, one action per step, and ask the user to report back.
 3. Escalation: if verified knowledge does not cover the question, if the issue needs a human
