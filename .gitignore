@@ -1,0 +1,11 @@
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+node_modules/
+.next/
+frontend/next-env.d.ts
+*.tsbuildinfo
+backend/evals/last_run.json
+*.egg-info/
