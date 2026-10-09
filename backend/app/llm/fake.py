@@ -11,6 +11,7 @@ import json
 import re
 from typing import Any
 
+from app.guardrails.translit import key_tokens
 from app.llm.base import EventSink, LLMError, SchemaT, ToolExecutor, ToolSpec, TurnResult
 
 _DOC_RE = re.compile(r'<doc id="([^"]+)" title="([^"]+)">\n(.*?)\n</doc>', re.DOTALL)
@@ -66,9 +67,9 @@ class FakeProvider:
                 eta = f", ойролцоогоор {o['eta_minutes']} минутын дараа хүрнэ" if o.get("eta_minutes") else ""
                 reply = f"{o['order_id']} ({o['restaurant']}) захиалгын төлөв: {o['status']}{eta}."
         else:
-            docs = _DOC_RE.findall(turn_context)
-            if docs:
-                _, title, text = docs[0]
+            best = _best_section(user_text, _DOC_RE.findall(turn_context) + _DOC_RE.findall(system))
+            if best:
+                title, text = best
                 reply = f"[DEMO] {title}\n\n{text[:600]}"
             else:
                 reply = "[DEMO] Энэ талаар баталгаатай мэдээлэл олдсонгүй. Оператортой холбогдох уу?"
@@ -89,3 +90,16 @@ class FakeProvider:
 
     def reset_reasoning(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return history
+
+
+def _best_section(question: str, docs: list[tuple[str, str, str]]) -> tuple[str, str] | None:
+    """Keyword-overlap pick of the most relevant `## ` section (knowledge may sit in the
+    turn context in RAG mode or in the system prompt in full-context mode)."""
+    q = {t[:5] for t in key_tokens(question)}
+    best, best_score = None, 0
+    for _, title, body in docs:
+        for section in re.split(r"\n(?=## )", body):
+            score = len(q & {t[:5] for t in key_tokens(f"{title} {section}")})
+            if score > best_score:
+                best, best_score = (title, section.strip()), score
+    return best

@@ -1,15 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { sendFeedback, streamChat } from "@/lib/api";
+import { pollHandoff, sendFeedback, streamChat } from "@/lib/api";
 
 type Msg = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator" | "system";
   text: string;
   turnId?: string;
   status?: string;
-  escalation?: { ticket_id: string; phone: string };
+  escalation?: { ticket_id: string; phone: string; mode?: string };
   sources?: { id: string; title: string }[];
   rating?: 1 | -1;
   error?: boolean;
@@ -34,6 +34,34 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
   const [busy, setBusy] = useState(false);
   const sessionRef = useRef<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // Live operator: poll for replies while the conversation is with a person.
+  const [handoff, setHandoff] = useState<{ active: boolean; lastId: number }>({ active: false, lastId: 0 });
+  const lastIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!handoff.active) return;
+    let stopped = false;
+    const tick = async () => {
+      const sid = sessionRef.current;
+      if (!sid || stopped) return;
+      const r = await pollHandoff(token, sid, lastIdRef.current);
+      if (stopped) return;
+      if (r.messages.length) {
+        lastIdRef.current = r.last_id ?? lastIdRef.current;
+        setMessages((ms) => [
+          ...ms,
+          ...r.messages.map((m) => ({ id: `h${m.id}`, role: m.sender, text: m.text }) as Msg),
+        ]);
+      }
+      if (!r.active) setHandoff({ active: false, lastId: lastIdRef.current });
+    };
+    tick();
+    const t = setInterval(tick, 3000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [handoff.active, token]);
 
   useEffect(() => {
     try {
@@ -42,6 +70,8 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
       sessionRef.current = null;
     }
     setMessages([]);
+    lastIdRef.current = 0;
+    setHandoff({ active: false, lastId: 0 });
   }, [storageKey]);
 
   useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
@@ -77,6 +107,12 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
             break;
           case "escalation":
             patch(botId, (m) => ({ ...m, escalation: ev.data }));
+            if (ev.data.mode === "inchat") setHandoff({ active: true, lastId: lastIdRef.current });
+            break;
+          case "handoff":
+            // Delivered to the operator: no bot reply for this message.
+            setMessages((ms) => ms.filter((m) => m.id !== botId));
+            setHandoff((h) => (h.active ? h : { active: true, lastId: lastIdRef.current }));
             break;
           case "sources":
             patch(botId, (m) => ({ ...m, sources: ev.data.documents }));
@@ -115,6 +151,8 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
     sessionRef.current = null;
     try { sessionStorage.removeItem(storageKey); } catch {}
     setMessages([]);
+    lastIdRef.current = 0;
+    setHandoff({ active: false, lastId: 0 });
   }
 
   return (
@@ -122,7 +160,7 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
       <header className="chat-header">
         <div>
           <div className="chat-title">{title ?? "ТокТок туслах"}</div>
-          <div className="chat-sub">24/7 · Монгол хэлээр</div>
+          <div className="chat-sub">{handoff.active ? "Оператортой холбогдсон" : "24/7 · Монгол хэлээр"}</div>
         </div>
         <button className="ghost" onClick={newConversation} disabled={busy} title="Шинэ яриа">
           Шинэ яриа
@@ -145,11 +183,15 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
         {messages.map((m) => (
           <div key={m.id} className={`row ${m.role}`}>
             <div className={`bubble ${m.role} ${m.error ? "error" : ""}`}>
+              {m.role === "operator" && <div className="who">Оператор</div>}
               {m.text && <div className="text">{m.text}</div>}
               {m.status && <div className="status"><span className="dot" />{m.status}</div>}
               {m.escalation && (
                 <div className="escalation">
-                  <div>Оператор руу шилжүүллээ · <b>{m.escalation.ticket_id}</b></div>
+                  <div>
+                    {m.escalation.mode === "inchat" ? "Оператор энэ чатаар хариулна" : "Оператор руу шилжүүллээ"} ·{" "}
+                    <b>{m.escalation.ticket_id}</b>
+                  </div>
                   <a className="call" href={`tel:${m.escalation.phone.replace(/[^0-9+]/g, "")}`}>
                     📞 {m.escalation.phone} руу залгах
                   </a>

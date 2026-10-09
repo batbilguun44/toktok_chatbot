@@ -5,10 +5,11 @@ export type ChatEvent =
   | { type: "status"; data: { text: string; tool?: string } }
   | { type: "text"; data: { delta: string } }
   | { type: "tool"; data: { name: string; state: "start" | "done" | "failed" } }
-  | { type: "escalation"; data: { ticket_id: string; phone: string; category: string } }
+  | { type: "escalation"; data: { ticket_id: string; phone: string; category: string; mode?: "inchat" | "phone" } }
+  | { type: "handoff"; data: { ticket_id: string; status: string; message_id: number } }
   | { type: "sources"; data: { documents: { id: string; title: string }[] } }
   | { type: "error"; data: { code: string; message: string } }
-  | { type: "done"; data: { turn_id: string; stop: string; latency_ms?: number } };
+  | { type: "done"; data: { turn_id?: string; stop: string; latency_ms?: number } };
 
 /** POSTs a message and yields server-sent events as they arrive. */
 export async function* streamChat(
@@ -49,6 +50,22 @@ export async function* streamChat(
   }
 }
 
+export type HandoffPoll = {
+  active: boolean;
+  status?: string;
+  ticket_id?: string;
+  last_id?: number;
+  messages: { id: number; sender: "operator" | "system"; text: string; created_at: string }[];
+};
+
+export async function pollHandoff(token: string, sessionId: string, after: number): Promise<HandoffPoll> {
+  const res = await fetch(`${API_BASE}/api/chat/handoff?session_id=${encodeURIComponent(sessionId)}&after=${after}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return { active: false, messages: [] };
+  return res.json();
+}
+
 export async function sendFeedback(token: string, turnId: string, rating: 1 | -1, comment?: string) {
   await fetch(`${API_BASE}/api/feedback`, {
     method: "POST",
@@ -57,11 +74,43 @@ export async function sendFeedback(token: string, turnId: string, rating: 1 | -1
   });
 }
 
-export async function adminFetch<T>(key: string, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}/api/admin${path}`, {
+// ---------------------------------------------------------------- staff API
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Staff requests use the HttpOnly session cookie set by SSO / dev login. */
+export async function staffFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const isForm = init?.body instanceof FormData;
+  const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", "X-Admin-Key": key, ...(init?.headers ?? {}) },
+    credentials: "include",
+    headers: {
+      ...(isForm ? {} : { "Content-Type": "application/json" }),
+      "X-Requested-With": "toktok-admin",
+      ...(init?.headers ?? {}),
+    },
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      msg = (await res.json()).detail ?? msg;
+    } catch {}
+    throw new ApiError(res.status, typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
   return res.json() as Promise<T>;
 }
+
+export type Me = { email: string; roles: string[]; permissions: string[]; via: string };
+export type AuthConfig = { sso_enabled: boolean; dev_login_enabled: boolean; roles: string[] };
+
+export const authApi = {
+  config: () => staffFetch<AuthConfig>("/api/auth/config"),
+  me: () => staffFetch<Me>("/api/auth/me"),
+  devLogin: (email: string, roles: string[]) =>
+    staffFetch("/api/auth/dev-login", { method: "POST", body: JSON.stringify({ email, roles }) }),
+  logout: () => staffFetch("/api/auth/logout", { method: "POST" }),
+  ssoUrl: (returnTo: string) => `${API_BASE}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`,
+};

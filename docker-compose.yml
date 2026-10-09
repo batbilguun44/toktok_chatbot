@@ -31,6 +31,8 @@ services:
       VECTOR_STORE: qdrant
       QDRANT_URL: http://qdrant:6333
       CORS_ORIGINS: '["http://localhost:3000"]'
+      FRONTEND_BASE_URL: http://localhost:3000
+      OIDC_REDIRECT_URI: http://localhost:8000/api/auth/callback
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
