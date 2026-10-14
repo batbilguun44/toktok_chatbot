@@ -28,6 +28,8 @@ class SessionState:
     kb_applied_id: str | None = None
     # Live human handoff: while set and open, user messages go to the operator, not the bot.
     handoff_id: str | None = None
+    # Operation-team instructions this session started with (system prompt stays fixed).
+    instructions: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

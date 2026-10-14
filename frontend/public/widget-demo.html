@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="mn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Popup Demo</title>
+<style>
+  :root { --bg:#fafafa; --card:#fff; --text:#111827; --muted:#6b7280; --accent:#ffb600; --green:#82b812; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px;
+           background:var(--card); border-bottom:1px solid #e5e7eb; flex-wrap:wrap; }
+  header b { font-size:18px; }
+  .seg a { padding:6px 12px; border-radius:999px; text-decoration:none; color:var(--muted); font-size:14px; }
+  .seg a.on { background:var(--accent); color:#fff; font-weight:600; }
+  main { max-width:1000px; margin:0 auto; padding:20px 16px; display:grid; gap:16px;
+         grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); }
+  .card { background:var(--card); border-radius:12px; padding:16px; border:1px solid #e5e7eb; }
+  .card h3 { margin:0 0 6px; font-size:15px; } .card p { margin:0; color:var(--muted); font-size:14px; }
+  .note { grid-column:1/-1; font-size:13px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <b>TokTok — <span id="who"></span> (жишээ хуудас)</b>
+  <nav class="seg">
+    <a href="?persona=driver">Хүргэгч</a>
+    <a href="?persona=client">Ресторан</a>
+  </nav>
+</header>
+<main>
+  <div class="card"><h3>Өнөөдрийн захиалга</h3><p>Энэ хэсэг нь TokTok-ийн системийн жишээ агуулга.</p></div>
+  <div class="card"><h3>Орлого</h3><p>Чатбот баруун доод буланд popup-аар гарч ирнэ.</p></div>
+  <div class="card"><h3>Тохиргоо</h3><p>Утасны өргөнд (&lt; 640px) бүтэн дэлгэцээр нээгдэнэ.</p></div>
+  <p class="note">Хөгжүүлэлтийн demo: хэрэглэгчийн токеныг demo-* утгаар орлуулсан.</p>
+</main>
+<script>
+  var persona = new URLSearchParams(location.search).get("persona") || "driver";
+  var names = { driver: "Хүргэгч", client: "Ресторан" };
+  var tokens = { driver: "demo-driver", client: "demo-client" };
+  if (!names[persona]) persona = "driver";
+  document.getElementById("who").textContent = names[persona] || persona;
+  document.querySelectorAll(".seg a").forEach(function (a) {
+    if (a.getAttribute("href").endsWith(persona)) a.className = "on";
+  });
+  window.TokTokChat = {
+    origin: location.origin,
+    persona: persona,
+    getToken: function () { return Promise.resolve(tokens[persona]); },
+  };
+</script>
+<script src="/widget.js" async></script>
+</body>
+</html>

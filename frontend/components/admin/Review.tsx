@@ -6,8 +6,14 @@ import { Diff, PERSONA_MN, when } from "./common";
 
 type V = { doc_id: string; version: number; persona: string; title: string; body: string; author: string;
   source: string; updated_at: string; visibility: string };
-type Item = { draft: V; published: V | null };
+// kind: knowledge document or bot instructions (one per persona; doc_id = persona).
+type Item = { kind: "kb" | "prompt"; draft: V; published: V | null };
 
+const base = (it: Item) =>
+  it.kind === "kb" ? `/api/admin/kb/${it.draft.doc_id}` : `/api/admin/prompts/${it.draft.doc_id}`;
+const keyOf = (it: Item) => `${it.kind}:${it.draft.doc_id}`;
+
+/** Everything waiting for an admin: knowledge changes and bot-instruction changes. */
 export default function Review({ me, onErr }: { me: Me; onErr: (e: string | null) => void }) {
   const [items, setItems] = useState<Item[]>([]);
   const [comments, setComments] = useState<Record<string, string>>({});
@@ -15,7 +21,11 @@ export default function Review({ me, onErr }: { me: Me; onErr: (e: string | null
 
   const load = useCallback(async () => {
     try {
-      setItems(await staffFetch<Item[]>("/api/admin/kb/review"));
+      const [kb, prompts] = await Promise.all([
+        staffFetch<Omit<Item, "kind">[]>("/api/admin/kb/review"),
+        staffFetch<Omit<Item, "kind">[]>("/api/admin/prompts-review"),
+      ]);
+      setItems([...prompts.map((x) => ({ ...x, kind: "prompt" as const })), ...kb.map((x) => ({ ...x, kind: "kb" as const }))]);
       onErr(null);
     } catch (e) {
       onErr(String(e));
@@ -25,8 +35,8 @@ export default function Review({ me, onErr }: { me: Me; onErr: (e: string | null
 
   async function decide(it: Item, action: "approve" | "reject") {
     try {
-      await staffFetch(`/api/admin/kb/${it.draft.doc_id}/versions/${it.draft.version}/${action}`, {
-        method: "POST", body: JSON.stringify({ comment: comments[it.draft.doc_id] || null }),
+      await staffFetch(`${base(it)}/versions/${it.draft.version}/${action}`, {
+        method: "POST", body: JSON.stringify({ comment: comments[keyOf(it)] || null }),
       });
       await load();
     } catch (e) {
@@ -38,15 +48,21 @@ export default function Review({ me, onErr }: { me: Me; onErr: (e: string | null
   return (
     <section className="review">
       {items.map((it) => {
+        const k = keyOf(it);
         const own = it.draft.author === me.email && !me.roles.includes("admin");
         return (
-          <article key={it.draft.doc_id} className="review-item">
+          <article key={k} className="review-item">
             <header>
-              <b>{it.draft.title}</b> <code className="muted">{it.draft.doc_id} v{it.draft.version}</code>
+              {it.kind === "prompt"
+                ? <><span className="badge in_review">Ботын заавар</span>{" "}<b>{PERSONA_MN[it.draft.persona]}</b>{" "}
+                    <code className="muted">v{it.draft.version}</code></>
+                : <><span className="badge">Мэдлэгийн сан</span>{" "}<b>{it.draft.title}</b>{" "}
+                    <code className="muted">{it.draft.doc_id} v{it.draft.version}</code></>}
               <div className="small muted">
-                {PERSONA_MN[it.draft.persona]} · {it.draft.author} · {when(it.draft.updated_at)}
+                {it.kind === "kb" && <>{PERSONA_MN[it.draft.persona]} · </>}{it.draft.author} · {when(it.draft.updated_at)}
                 {it.draft.source === "ai-suggestion" && " · AI санал (баримтжуулах шаардлагатай)"}
-                {it.draft.visibility === "internal" && " · дотоод"}
+                {it.draft.visibility === "internal" && it.kind === "kb" && " · дотоод"}
+                {it.kind === "prompt" && " · батлагдвал шинээр эхлэх ярианд хэрэгжинэ"}
               </div>
             </header>
             {it.published ? <Diff before={it.published.body} after={it.draft.body} />
@@ -54,11 +70,11 @@ export default function Review({ me, onErr }: { me: Me; onErr: (e: string | null
             {/\[ТОДРУУЛАХ/.test(it.draft.body) && <div className="err small">Бөглөөгүй [ТОДРУУЛАХ] хэсэг байна — нийтлэхээс өмнө засна уу.</div>}
             {canPublish && (
               <div className="row2">
-                <input placeholder="Тайлбар (буцаахад заавал)" value={comments[it.draft.doc_id] ?? ""}
-                       onChange={(e) => setComments({ ...comments, [it.draft.doc_id]: e.target.value })} />
+                <input placeholder="Тайлбар (буцаахад заавал)" value={comments[k] ?? ""}
+                       onChange={(e) => setComments({ ...comments, [k]: e.target.value })} />
                 <button onClick={() => decide(it, "approve")} disabled={own}
                         title={own ? "Өөрийн өөрчлөлтийг өөр хүн батлах ёстой" : ""}>Батлах</button>
-                <button className="ghost" onClick={() => decide(it, "reject")} disabled={!comments[it.draft.doc_id]}>Буцаах</button>
+                <button className="ghost" onClick={() => decide(it, "reject")} disabled={!comments[k]}>Буцаах</button>
               </div>
             )}
           </article>

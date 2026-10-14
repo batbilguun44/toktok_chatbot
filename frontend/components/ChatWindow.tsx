@@ -27,7 +27,17 @@ const SUGGESTIONS: Record<string, string[]> = {
   customer: ["Миний захиалга хаана явж байна?", "Хаягаа буруу оруулчихлаа", "zahialga hezee ireh ve"],
 };
 
-export default function ChatWindow({ token, persona, title }: { token: string; persona: string; title?: string }) {
+type Props = {
+  token: string;
+  persona: string;
+  title?: string;
+  /** Shown as a close button in the header (popup / app embed). */
+  onClose?: () => void;
+  /** Called with the number of operator messages that just arrived. */
+  onOperatorMessages?: (count: number) => void;
+};
+
+export default function ChatWindow({ token, persona, title, onClose, onOperatorMessages }: Props) {
   const storageKey = `toktok-session-${token}`;
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -37,6 +47,8 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
   // Live operator: poll for replies while the conversation is with a person.
   const [handoff, setHandoff] = useState<{ active: boolean; lastId: number }>({ active: false, lastId: 0 });
   const lastIdRef = useRef(0);
+  const onOperatorMessagesRef = useRef(onOperatorMessages);
+  onOperatorMessagesRef.current = onOperatorMessages;
 
   useEffect(() => {
     if (!handoff.active) return;
@@ -48,6 +60,8 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
       if (stopped) return;
       if (r.messages.length) {
         lastIdRef.current = r.last_id ?? lastIdRef.current;
+        const fromOperator = r.messages.filter((m) => m.sender === "operator").length;
+        if (fromOperator) onOperatorMessagesRef.current?.(fromOperator);
         setMessages((ms) => [
           ...ms,
           ...r.messages.map((m) => ({ id: `h${m.id}`, role: m.sender, text: m.text }) as Msg),
@@ -74,7 +88,7 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
     setHandoff({ active: false, lastId: 0 });
   }, [storageKey]);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const patch = (id: string, fn: (m: Msg) => Msg) =>
     setMessages((ms) => ms.map((m) => (m.id === id ? fn(m) : m)));
@@ -162,9 +176,16 @@ export default function ChatWindow({ token, persona, title }: { token: string; p
           <div className="chat-title">{title ?? "ТокТок туслах"}</div>
           <div className="chat-sub">{handoff.active ? "Оператортой холбогдсон" : "24/7 · Монгол хэлээр"}</div>
         </div>
-        <button className="ghost" onClick={newConversation} disabled={busy} title="Шинэ яриа">
-          Шинэ яриа
-        </button>
+        <div className="chat-actions">
+          <button className="ghost" onClick={newConversation} disabled={busy} title="Шинэ яриа">
+            Шинэ яриа
+          </button>
+          {onClose && (
+            <button className="ghost chat-close" onClick={onClose} aria-label="Хаах" title="Хаах">
+              ✕
+            </button>
+          )}
+        </div>
       </header>
 
       <div className="chat-body">

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.cms.service import CMSService
+from app.cms.service import CMSService, InstructionsService
 from app.cms.store import InMemoryKnowledgeStore, KnowledgeStore, PostgresKnowledgeStore
 from app.config import Settings
 from app.handoff.service import HandoffService, NoopNotifier, WebhookNotifier
@@ -16,6 +16,7 @@ from app.memory.session import InMemorySessionStore, RedisSessionStore, SessionS
 from app.observability.tracing import LangfuseTracer, NoopTracer, Tracer
 from app.orchestrator.graph import Services
 from app.orchestrator.service import ChatService
+from app.personas.prompts import DEFAULT_INSTRUCTIONS
 from app.rag.contextual import Contextualizer
 from app.rag.documents import load_directory
 from app.rag.embeddings import Embedder, VoyageEmbedder
@@ -38,10 +39,12 @@ class Container:
     signer: Signer
     oidc: OIDCClient | None
     cms: CMSService = None  # type: ignore[assignment]
+    prompts: InstructionsService = None  # type: ignore[assignment]
     chat: ChatService = None  # type: ignore[assignment]
     _closers: list[Any] = field(default_factory=list)
     _kb_revision: str | None = None
     _kb_checked_at: float = 0.0
+    _prompt_revision: str | None = None
 
     async def reindex(self) -> dict[str, int]:
         rev = await self.cms.store.revision()
@@ -63,6 +66,14 @@ class Container:
         if await self.cms.store.revision() != self._kb_revision:
             log.info("knowledge revision changed; reindexing")
             await self.reindex()
+        if await self.prompts.store.revision() != self._prompt_revision:
+            log.info("bot instructions revision changed; reloading")
+            await self.reload_instructions()
+
+    async def reload_instructions(self) -> None:
+        rev = await self.prompts.store.revision()
+        self.services.instructions = await self.prompts.published()
+        self._prompt_revision = rev
 
     async def aclose(self) -> None:
         self.services.tracer.flush()
@@ -76,6 +87,10 @@ def _make_llm(s: Settings) -> LLMProvider:
 
         log.warning("LLM_PROVIDER=fake: offline demo provider, not for production")
         return FakeProvider()
+    if s.llm_provider == "gemini":
+        from app.llm.gemini_provider import GeminiProvider
+
+        return GeminiProvider(s)
     from app.llm.anthropic_provider import AnthropicProvider
 
     return AnthropicProvider(s)
@@ -125,6 +140,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     repo: Repository
     staff: StaffStore
     kstore: KnowledgeStore
+    pstore: KnowledgeStore  # bot instructions (same versioned store, separate tables)
     if s.database_url:
         from psycopg_pool import AsyncConnectionPool
 
@@ -134,10 +150,12 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         pg = PostgresRepository(pool, s.embedding_dim)
         await pg.init_schema()
         repo, staff, kstore = pg, PostgresStaffStore(pool), PostgresKnowledgeStore(pool)
+        pstore = PostgresKnowledgeStore(pool, prefix="prompt")
         if migrated := await kstore.migrate_legacy():
             log.info("migrated %d legacy admin-edited docs into the CMS", migrated)
     else:
         repo, staff, kstore = InMemoryRepository(), InMemoryStaffStore(), InMemoryKnowledgeStore()
+        pstore = InMemoryKnowledgeStore()
 
     sessions: SessionStore
     if s.redis_url:
@@ -178,8 +196,12 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     c = Container(settings=s, services=services, staff=staff, signer=Signer(s.staff_session_secret), oidc=oidc,
                   _closers=closers)
     c.cms = CMSService(kstore, staff, on_publish=c.reindex, four_eyes=s.cms_four_eyes)
+    c.prompts = InstructionsService(pstore, staff, on_publish=c.reload_instructions, four_eyes=s.cms_four_eyes)
     c.chat = ChatService(services, ensure_fresh=c.ensure_fresh)
     if seeded := await c.cms.seed_from_files(load_directory(s.knowledge_dir)):
         log.info("seeded %d knowledge docs from %s", seeded, s.knowledge_dir)
+    if seeded := await c.prompts.seed_defaults(DEFAULT_INSTRUCTIONS):
+        log.info("seeded default bot instructions for %d personas", seeded)
     await c.reindex()
+    await c.reload_instructions()
     return c

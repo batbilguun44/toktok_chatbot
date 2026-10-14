@@ -60,6 +60,8 @@ class Services:
     tracer: Tracer
     handoff: HandoffService
     background: set = field(default_factory=set)  # running judge tasks (kept referenced)
+    # persona -> published operation-team instructions (refreshed on publish; see container.py).
+    instructions: dict[str, str] = field(default_factory=dict)
 
     async def drain(self) -> None:
         """Wait for background work (tests, graceful shutdown)."""
@@ -188,7 +190,10 @@ def build_graph(svc: Services):
             tspan.end()
             return out
 
-        system = system_prompt(user.persona)
+        if session.instructions is None:
+            # Frozen for the session like the knowledge pack: edits apply to new conversations.
+            session.instructions = svc.instructions.get(user.persona)
+        system = system_prompt(user.persona, session.instructions)
         if st.get("pack"):
             system += "\n\n## Verified knowledge base\n" + st["pack"].text
         gen = st["trace"].child("agent", as_type="generation", model=s.agent_model,

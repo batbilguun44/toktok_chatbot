@@ -85,7 +85,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
 
 class DevLoginIn(BaseModel):
     email: str = Field(pattern=r"^[^@\s]+@[^@\s]+$")
-    roles: list[Literal["operator", "editor", "approver", "admin"]] = ["admin"]
+    roles: list[Literal["operator", "admin"]] = ["admin"]
 
 
 @router.post("/dev-login")
@@ -113,7 +113,7 @@ async def me(p: Principal = Depends(current_staff)):
 # ------------------------------------------------------------ staff admin
 class StaffIn(BaseModel):
     name: str | None = Field(default=None, max_length=120)
-    roles: list[Literal["operator", "editor", "approver", "admin"]]
+    roles: list[Literal["operator", "admin"]]
     active: bool = True
 
 

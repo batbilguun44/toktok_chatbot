@@ -15,8 +15,8 @@ from app.staff.store import permissions_for
 from tests.conftest import collect
 from tests.helpers import ScriptedProvider
 
-EDITOR = Principal("ed@toktok.mn", ["editor"], permissions_for(["editor"]), "dev")
-APPROVER = Principal("lead@toktok.mn", ["approver"], permissions_for(["approver"]), "dev")
+EDITOR = Principal("ed@toktok.mn", ["operator"], permissions_for(["operator"]), "dev")
+APPROVER = Principal("lead@toktok.mn", ["admin"], permissions_for(["admin"]), "dev")
 ADMIN = Principal("admin@toktok.mn", ["admin"], permissions_for(["admin"]), "dev")
 
 
@@ -105,7 +105,7 @@ async def test_cms_rules(settings):
     await c.cms.save_draft(EDITOR, "driver-x", DraftInput("driver", "Гарчиг", "Агуулга 1234567890", []))
     v = await c.cms.submit(EDITOR, "driver-x")
     try:
-        await c.cms.approve(EDITOR.__class__("ed@toktok.mn", ["approver"], permissions_for(["approver"]), "dev"),
+        await c.cms.approve(EDITOR.__class__("ed@toktok.mn", ["operator"], permissions_for(["operator"]), "dev"),
                             "driver-x", v.version, None)
         raise AssertionError("author approved own change")
     except CMSError as e:

@@ -2,6 +2,8 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Badge, PERSONA_MN, when } from "@/components/admin/common";
+import Knowledge from "@/components/admin/Knowledge";
+import Prompts from "@/components/admin/Prompts";
 import StaffGate from "@/components/StaffGate";
 import { Me, staffFetch } from "@/lib/api";
 
@@ -24,7 +26,19 @@ export default function OperatorPage() {
   );
 }
 
+// Operators answer chats and maintain the bot's knowledge; an admin approves what they submit.
+const AREAS = [
+  { id: "chat", label: "Чат", perm: "handoff" },
+  { id: "knowledge", label: "Мэдлэгийн сан", perm: "kb.read" },
+  { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
+] as const;
+
 function Console({ me, logout }: { me: Me; logout: () => void }) {
+  const areas = AREAS.filter((a) => me.permissions.includes(a.perm));
+  // This page only drafts and submits; approving, rolling back and archiving happen on /admin
+  // (even for admins), so the knowledge / instruction editors here never show those controls.
+  const drafter = { ...me, permissions: me.permissions.filter((p) => p !== "kb.publish") };
+  const [area, setArea] = useState<(typeof AREAS)[number]["id"]>("chat");
   const [view, setView] = useState<"queued" | "mine" | "resolved">("queued");
   const [rows, setRows] = useState<Esc[]>([]);
   const [sel, setSel] = useState<string | null>(null);
@@ -64,7 +78,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
     return () => clearInterval(t);
   }, [loadDetail]);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [detail?.messages.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [detail?.messages.length]);
 
   async function act(path: string, body?: object) {
     try {
@@ -91,11 +105,20 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
     <main className="operator">
       <header className="admin-header">
         <h1>Операторын самбар</h1>
-        <div className="small">{me.email} {me.permissions.includes("kb.read") && <a href="/admin">Operation</a>}{" "}
+        <div className="small">{me.email} {me.permissions.includes("staff.manage") && <a href="/admin">Админ</a>}{" "}
           <button className="ghost" onClick={logout}>Гарах</button></div>
       </header>
+      <nav className="tabs">
+        {areas.map((a) => (
+          <button key={a.id} className={area === a.id ? "active" : ""} onClick={() => { setArea(a.id); setErr(null); }}>
+            {a.label}
+          </button>
+        ))}
+      </nav>
       {err && <div className="alert">{err}</div>}
-      <div className="op-grid">
+      {area === "knowledge" && <Knowledge me={drafter} onErr={setErr} />}
+      {area === "prompts" && <Prompts me={drafter} onErr={setErr} />}
+      {area === "chat" && <div className="op-grid">
         <aside>
           <nav className="tabs">
             {(["queued", "mine", "resolved"] as const).map((v) => (
@@ -117,7 +140,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
           </ul>
         </aside>
         <section className="op-chat">
-          {!esc ? <p className="muted">Яриа сонгоно уу.</p> : (
+          {!esc ? <p className="muted op-empty">Зүүн талаас яриа сонгоно уу.</p> : (
             <>
               <div className="op-head">
                 <div><b>{esc.id}</b> · {PERSONA_MN[esc.persona]} · {CATEGORY_MN[esc.category] ?? esc.category}</div>
@@ -159,7 +182,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
             </>
           )}
         </section>
-      </div>
+      </div>}
     </main>
   );
 }

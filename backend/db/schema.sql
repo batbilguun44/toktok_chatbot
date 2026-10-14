@@ -128,6 +128,10 @@ CREATE TABLE IF NOT EXISTS kb_versions (
 );
 CREATE INDEX IF NOT EXISTS kb_versions_state_idx ON kb_versions (state);
 
+-- Operation-team bot instructions: one document per persona, same workflow as kb_*.
+CREATE TABLE IF NOT EXISTS prompt_docs (LIKE kb_docs INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS prompt_versions (LIKE kb_versions INCLUDING ALL);
+
 -- Live human handoff: escalations double as the operator queue.
 ALTER TABLE escalations ADD COLUMN IF NOT EXISTS assignee TEXT;
 ALTER TABLE escalations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
