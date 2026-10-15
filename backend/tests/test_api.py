@@ -10,7 +10,7 @@ from app.config import get_settings
 
 @pytest.fixture
 def client(monkeypatch):
-    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "ADMIN_API_KEY": "test-admin",
+    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "QDRANT_URL": "", "ADMIN_API_KEY": "test-admin",
                  "EMBEDDING_PROVIDER": "none", "LANGFUSE_PUBLIC_KEY": "", "RATE_LIMIT_PER_MINUTE": "5",
                  "STAFF_SESSION_SECRET": "s" * 40, "JUDGE_SAMPLE_RATE": "0"}.items():
         monkeypatch.setenv(k, v)

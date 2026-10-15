@@ -1,6 +1,9 @@
 """Operation-team API: knowledge CMS, metrics, online evaluation, improvement loop."""
 
+import csv
+import io
 import time
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -12,6 +15,8 @@ from app.cms.preview import preview_answer
 from app.cms.service import CMSError, DraftInput, parse_upload
 from app.container import Container
 from app.insights.loop import run_insights
+from app.memory.repository import EXPORT_COLUMNS, ConversationFilter
+from app.orchestrator.graph import UB_TZ
 from app.personas.prompts import INSTRUCTIONS_MAX_CHARS, locked_prompt
 from app.staff.auth import Principal
 
@@ -302,6 +307,59 @@ async def prompts_preview(body: InstructionsPreviewIn, _: Principal = Depends(re
                           c: Container = Depends(container)):
     return await preview_answer(c.services, await c.cms.published_docs(), body.persona, body.question, None,
                                 instructions=body.body)
+
+
+# ------------------------------------------------------------- conversations
+def _conv_filter(persona: Persona | None, escalated: bool | None, negative: bool | None, q: str | None,
+                 date_from: str | None, date_to: str | None, limit: int = 50, offset: int = 0) -> ConversationFilter:
+    """Dates are YYYY-MM-DD in Ulaanbaatar time; date_to is inclusive."""
+    def day(s: str | None, plus: int = 0) -> float | None:
+        if not s:
+            return None
+        try:
+            d = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UB_TZ)
+        except ValueError:
+            raise HTTPException(400, "dates must be YYYY-MM-DD")
+        return (d + timedelta(days=plus)).timestamp()
+    return ConversationFilter(persona=persona, escalated=escalated, negative_feedback=negative,
+                              q=(q or "").strip() or None, since_epoch=day(date_from), until_epoch=day(date_to, 1),
+                              limit=max(1, min(limit, 200)), offset=max(0, offset))
+
+
+@admin.get("/conversations")
+async def conversations(persona: Persona | None = None, escalated: bool | None = None, negative: bool | None = None,
+                        q: str | None = None, date_from: str | None = None, date_to: str | None = None,
+                        limit: int = 50, offset: int = 0, _: Principal = Depends(require("metrics.read")),
+                        c: Container = Depends(container)):
+    return await c.services.repo.list_conversations(
+        _conv_filter(persona, escalated, negative, q, date_from, date_to, limit, offset))
+
+
+@admin.get("/conversations.csv")
+async def conversations_csv(persona: Persona | None = None, escalated: bool | None = None,
+                            negative: bool | None = None, q: str | None = None, date_from: str | None = None,
+                            date_to: str | None = None, p: Principal = Depends(require("metrics.read")),
+                            c: Container = Depends(container)):
+    """Every turn of the matching conversations, one row per question/answer (UTF-8 with BOM for Excel)."""
+    rows = await c.services.repo.export_turns(_conv_filter(persona, escalated, negative, q, date_from, date_to))
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=EXPORT_COLUMNS)
+    w.writeheader()
+    w.writerows(rows)
+    await c.staff.audit(p.email, "conversations.export", None, {"rows": len(rows), "persona": persona,
+                                                                 "from": date_from, "to": date_to})
+    name = f"toktok-chats-{date_from or 'all'}-{date_to or 'now'}.csv"
+    return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@admin.get("/conversations/{conversation_id}")
+async def conversation_detail(conversation_id: str, _: Principal = Depends(require("metrics.read")),
+                              c: Container = Depends(container)):
+    log = await c.services.repo.conversation_log(conversation_id)
+    if not log:
+        raise HTTPException(404, "conversation not found")
+    return log
 
 
 # ------------------------------------------------------- metrics & evaluation

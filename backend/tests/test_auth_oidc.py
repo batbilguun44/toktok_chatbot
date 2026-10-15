@@ -45,7 +45,7 @@ class FakeIdP:
 
 @pytest.fixture
 def setup(monkeypatch):
-    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "OIDC_ISSUER": ISSUER,
+    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "QDRANT_URL": "", "OIDC_ISSUER": ISSUER,
                  "OIDC_CLIENT_ID": "client-1", "OIDC_CLIENT_SECRET": "secret",
                  "OIDC_ALLOWED_DOMAINS": '["toktok.mn"]', "STAFF_BOOTSTRAP_ADMINS": '["boss@toktok.mn"]',
                  "STAFF_SESSION_SECRET": "x" * 40, "FRONTEND_BASE_URL": "http://front.test"}.items():

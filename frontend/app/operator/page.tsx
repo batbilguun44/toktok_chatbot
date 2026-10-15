@@ -80,6 +80,19 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [detail?.messages.length]);
 
+  const alerts = useQueueAlerts(me.permissions.includes("handoff"));
+  // A user writing in the open conversation while this tab is in the background.
+  const lastUserMsg = useRef<number | null>(null);
+  useEffect(() => {
+    const users = detail?.messages.filter((m) => m.sender === "user") ?? [];
+    const latest = users.length ? users[users.length - 1].id : 0;
+    if (lastUserMsg.current !== null && latest > lastUserMsg.current && document.hidden) {
+      alerts.notify("Хэрэглэгч бичлээ", users[users.length - 1].text);
+    }
+    lastUserMsg.current = latest;
+  }, [detail?.messages, alerts]);
+  useEffect(() => { lastUserMsg.current = null; }, [sel]);
+
   async function act(path: string, body?: object) {
     try {
       await staffFetch(`/api/operator/handoffs/${sel}${path}`, { method: "POST", body: JSON.stringify(body ?? {}) });
@@ -106,12 +119,15 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
       <header className="admin-header">
         <h1>Операторын самбар</h1>
         <div className="small">{me.email} {me.permissions.includes("staff.manage") && <a href="/admin">Админ</a>}{" "}
+          {alerts.permission === "default" && (
+            <button className="ghost" onClick={alerts.enable}>🔔 Мэдэгдэл асаах</button>
+          )}{" "}
           <button className="ghost" onClick={logout}>Гарах</button></div>
       </header>
       <nav className="tabs">
         {areas.map((a) => (
           <button key={a.id} className={area === a.id ? "active" : ""} onClick={() => { setArea(a.id); setErr(null); }}>
-            {a.label}
+            {a.label}{a.id === "chat" && alerts.queued > 0 && <span className="count">{alerts.queued}</span>}
           </button>
         ))}
       </nav>
@@ -124,6 +140,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
             {(["queued", "mine", "resolved"] as const).map((v) => (
               <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
                 {{ queued: "Хүлээгдэж буй", mine: "Миний", resolved: "Шийдсэн" }[v]}
+                {v === "queued" && alerts.queued > 0 && <span className="count">{alerts.queued}</span>}
               </button>
             ))}
           </nav>
@@ -185,4 +202,73 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
       </div>}
     </main>
   );
+}
+
+/**
+ * New handoffs must not wait unnoticed: polls the waiting queue on every operator tab and, when a new
+ * conversation arrives, beeps, shows a browser notification (after the operator allows it) and puts
+ * the count in the tab title.
+ */
+function useQueueAlerts(enabled: boolean) {
+  const [queued, setQueued] = useState(0);
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">("unsupported");
+  const seen = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    setPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
+  }, []);
+
+  const notify = useCallback((title: string, body: string) => {
+    beep();
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const n = new Notification(title, { body: body.slice(0, 140), tag: "toktok-operator" });
+      n.onclick = () => { window.focus(); n.close(); };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const base = document.title.replace(/^\(\d+\)\s*/, "");
+    let stopped = false;
+    const check = async () => {
+      try {
+        const rows = await staffFetch<Esc[]>("/api/operator/queue?status=queued");
+        if (stopped) return;
+        const fresh = seen.current ? rows.filter((r) => !seen.current!.has(r.id)) : [];
+        seen.current = new Set(rows.map((r) => r.id));
+        setQueued(rows.length);
+        document.title = rows.length ? `(${rows.length}) ${base}` : base;
+        if (fresh.length) {
+          notify(fresh.length > 1 ? `${fresh.length} шинэ яриа` : "Шинэ яриа ирлээ",
+            `${PERSONA_MN[fresh[0].persona] ?? fresh[0].persona}: ${fresh[0].summary}`);
+        }
+      } catch { /* shown by the queue panel */ }
+    };
+    check();
+    const t = setInterval(check, 5000);
+    return () => { stopped = true; clearInterval(t); document.title = base; };
+  }, [enabled, notify]);
+
+  const enable = useCallback(async () => {
+    if (typeof Notification === "undefined") return;
+    setPermission(await Notification.requestPermission());
+    beep();
+  }, []);
+
+  return { queued, permission, enable, notify };
+}
+
+function beep() {
+  try {
+    const ctx = new AudioContext();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.15, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+    o.connect(g).connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + 0.4);
+    o.onended = () => ctx.close();
+  } catch { /* audio blocked until the page has been interacted with */ }
 }

@@ -9,3 +9,8 @@ frontend/next-env.d.ts
 *.tsbuildinfo
 backend/evals/last_run.json
 *.egg-info/
+
+# Local env backups (contain secrets); keep the template
+.env.*
+!.env.example
+*.zip

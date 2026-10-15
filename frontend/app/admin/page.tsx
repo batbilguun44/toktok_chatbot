@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AuditPanel, ImprovePanel, MetricsPanel, StaffPanel } from "@/components/admin/Panels";
+import Conversations from "@/components/admin/Conversations";
 import Knowledge from "@/components/admin/Knowledge";
 import Prompts from "@/components/admin/Prompts";
 import Review from "@/components/admin/Review";
@@ -10,6 +11,7 @@ import { Me, staffFetch } from "@/lib/api";
 
 const TABS = [
   { id: "metrics", label: "Үзүүлэлт", perm: "metrics.read" },
+  { id: "conversations", label: "Яриа", perm: "metrics.read" },
   { id: "knowledge", label: "Мэдлэгийн сан", perm: "kb.read" },
   { id: "review", label: "Хянах", perm: "kb.publish" },
   { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
@@ -61,6 +63,7 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
       </nav>
       {err && <div className="alert">{err}</div>}
       {tab === "metrics" && <MetricsPanel onErr={onErr} />}
+      {tab === "conversations" && <Conversations onErr={onErr} />}
       {tab === "knowledge" && <Knowledge me={me} onErr={onErr} />}
       {tab === "review" && <Review me={me} onErr={onErr} />}
       {tab === "prompts" && <Prompts me={me} onErr={onErr} />}

@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     max_message_chars: int = 2000
     rate_limit_per_minute: int = 20
+    # Per client IP across all users: anonymous users (GATEWAY_MODE=faq_only) can mint new ids, so this caps
+    # abuse and AI cost. Generous because mobile carriers put many users behind one IP (CGNAT). Behind a load
+    # balancer run uvicorn with --proxy-headers and FORWARDED_ALLOW_IPS so the real client IP is seen. 0 = off.
+    rate_limit_per_ip_per_minute: int = 120
 
     # --- Observability (Langfuse) ---------------------------------------
     langfuse_public_key: str | None = None
