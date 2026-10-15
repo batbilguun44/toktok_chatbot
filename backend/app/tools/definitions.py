@@ -177,9 +177,15 @@ async def submit_merchant_request(ctx: ToolContext, a: MerchantRequestIn):
 ALL = frozenset({"driver", "client", "customer"})
 
 
-def build_registry() -> ToolRegistry:
+# Tools that only use TokTok knowledge / the handoff queue (no personal data).
+KNOWLEDGE_ONLY_TOOLS = frozenset({"search_knowledge", "escalate_to_human"})
+
+
+def build_registry(personal_data: bool = True) -> ToolRegistry:
+    """`personal_data=False` (GATEWAY_MODE=faq_only) leaves out every tool that reads or changes
+    a user's orders, profile or settlement, so the model cannot offer or invent such data."""
     T = Tool
-    return ToolRegistry(
+    tools = (
         [
             T("search_knowledge",
               "Search TokTok's verified knowledge base (rules, FAQs, how-to guides) for the current "
@@ -220,3 +226,4 @@ def build_registry() -> ToolRegistry:
               MerchantRequestIn, submit_merchant_request, frozenset({"client"}), "Хүсэлт бүртгэж байна…"),
         ]
     )
+    return ToolRegistry(tools if personal_data else [t for t in tools if t.name in KNOWLEDGE_ONLY_TOOLS])

@@ -130,6 +130,17 @@ def locked_prompt(persona: Persona) -> str:
     return _COMMON + "\n" + _LOCKED_PERSONA[persona]
 
 
-def system_prompt(persona: Persona, instructions: str | None = None) -> str:
+_NO_PERSONAL_DATA = """\
+## Account data is not connected yet
+You cannot see this user's orders, profile, documents, earnings or settlement, and you cannot change
+or request anything on their behalf. Tools mentioned in the instructions below that are not in your
+tool list are unavailable. For such questions: explain where the user can see it in their app if the
+knowledge base describes it, otherwise offer `escalate_to_human`. Never guess the user's own data.
+"""
+
+
+def system_prompt(persona: Persona, instructions: str | None = None, personal_data: bool = True) -> str:
+    """`personal_data=False` for GATEWAY_MODE=faq_only (no account tools)."""
     text = DEFAULT_INSTRUCTIONS[persona] if instructions is None else instructions
-    return locked_prompt(persona) + "\n" + _INSTRUCTIONS_HEADER + "\n" + text.strip() + "\n"
+    locked = locked_prompt(persona) + ("" if personal_data else "\n" + _NO_PERSONAL_DATA)
+    return locked + "\n" + _INSTRUCTIONS_HEADER + "\n" + text.strip() + "\n"

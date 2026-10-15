@@ -26,7 +26,7 @@ from app.rag.vector import InMemoryVectorIndex, PgVectorIndex
 from app.staff.auth import OIDCClient, Signer
 from app.staff.store import InMemoryStaffStore, PostgresStaffStore, StaffStore
 from app.tools.definitions import build_registry
-from app.tools.gateway import MockTokTokGateway
+from app.tools.gateway import AnonymousGateway, MockTokTokGateway, TokTokGateway
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +81,13 @@ class Container:
             await c()
 
 
+def _make_gateway(s: Settings) -> TokTokGateway:
+    if s.gateway_mode == "faq_only":
+        # Demo tokens keep the local demo pages working; production accepts anonymous users only.
+        return AnonymousGateway(demo=MockTokTokGateway() if s.env != "prod" else None)
+    return MockTokTokGateway()  # _check_prod keeps this out of production
+
+
 def _make_llm(s: Settings) -> LLMProvider:
     if s.llm_provider == "fake":
         from app.llm.fake import FakeProvider
@@ -128,6 +135,9 @@ def _check_prod(s: Settings) -> None:
         raise RuntimeError("ENV=prod requires OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET for staff login")
     if s.llm_provider == "fake":
         raise RuntimeError("LLM_PROVIDER=fake is not allowed with ENV=prod")
+    if s.gateway_mode == "mock":
+        raise RuntimeError("GATEWAY_MODE=mock serves fake orders; use faq_only in production until "
+                           "the TokTok API gateway is implemented")
     if not s.database_url or not s.redis_url:
         raise RuntimeError("ENV=prod requires DATABASE_URL and REDIS_URL")
 
@@ -187,7 +197,8 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     notifier = (WebhookNotifier(s.handoff_webhook_url, s.handoff_webhook_secret)
                 if s.handoff_webhook_url else NoopNotifier())
     services = Services(
-        settings=s, llm=the_llm, kb=kb, tools=build_registry(), gateway=MockTokTokGateway(), repo=repo,
+        settings=s, llm=the_llm, kb=kb, tools=build_registry(personal_data=s.gateway_mode != "faq_only"),
+        gateway=_make_gateway(s), repo=repo,
         sessions=sessions, tracer=tracer, handoff=HandoffService(repo, staff, notifier),
     )
     oidc = (OIDCClient(s.oidc_issuer, s.oidc_client_id, s.oidc_client_secret, s.oidc_redirect_uri, s.oidc_scopes)

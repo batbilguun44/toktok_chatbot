@@ -193,7 +193,7 @@ def build_graph(svc: Services):
         if session.instructions is None:
             # Frozen for the session like the knowledge pack: edits apply to new conversations.
             session.instructions = svc.instructions.get(user.persona)
-        system = system_prompt(user.persona, session.instructions)
+        system = system_prompt(user.persona, session.instructions, s.gateway_mode != "faq_only")
         if st.get("pack"):
             system += "\n\n## Verified knowledge base\n" + st["pack"].text
         gen = st["trace"].child("agent", as_type="generation", model=s.agent_model,

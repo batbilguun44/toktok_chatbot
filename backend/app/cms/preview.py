@@ -41,7 +41,7 @@ async def preview_answer(svc: Services, published, persona: str, question: str,
     state = {"decision": decision, "user": user, "flags": [], "hits": hits, "pack": pack, "kb_updates": ""}
     if instructions is None:
         instructions = svc.instructions.get(persona)
-    system = system_prompt(persona, instructions) + ("\n\n## Verified knowledge base\n" + pack.text if pack else "")
+    system = system_prompt(persona, instructions, s.gateway_mode != "faq_only") + ("\n\n## Verified knowledge base\n" + pack.text if pack else "")
     result = await svc.llm.run_turn(
         system=system, history=[], user_text=question, turn_context=_turn_context(state),
         tools=tools.specs(persona), execute_tool=lambda n, i: tools.execute(ctx, n, i), emit=lambda k, d: None,

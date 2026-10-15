@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # CLASSIFIER_MODEL to Gemini model ids).
     llm_provider: Literal["anthropic", "gemini", "fake"] = "anthropic"
     gemini_api_key: str | None = None
+    # TokTok data access for tools:
+    #   mock     : demo accounts and fake orders (development / demos)
+    #   faq_only : phase 1 before TokTok's API exists. No personal-data tools at all (the bot answers
+    #              from knowledge or escalates); users are anonymous ("anon:<persona>:<random id>").
+    gateway_mode: Literal["mock", "faq_only"] = "mock"
     # Tried in order when the Gemini model is overloaded (503) or out of quota (429).
     gemini_fallback_models: list[str] = []
     agent_model: str = "claude-opus-5-5"

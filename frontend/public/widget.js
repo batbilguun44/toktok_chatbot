@@ -6,8 +6,9 @@
  *     window.TokTokChat = {
  *       origin: "https://chat.toktok.mn",          // where /embed is served
  *       persona: "driver",                          // driver | client
- *       getToken: async () => currentUserToken(),   // signed-in user's TokTok token
+ *       getToken: async () => currentUserToken(),   // signed-in user's TokTok token (phase 2)
  *     };
+ * Phase 1 (FAQ + operator only): leave out getToken; an anonymous id is used instead.
  *   </script>
  *   <script src="https://chat.toktok.mn/widget.js" async></script>
  *
@@ -65,8 +66,23 @@
     if (frame && frame.contentWindow) frame.contentWindow.postMessage(msg, origin);
   }
 
+  // Phase 1 (backend GATEWAY_MODE=faq_only): no TokTok token yet. A random id per browser keeps
+  // each person's conversation separate; it identifies nobody and unlocks no personal data.
+  function anonymousToken() {
+    var key = "toktok-chat-anon-" + persona, id = null;
+    try { id = localStorage.getItem(key); } catch (e) { /* storage blocked */ }
+    if (!id) {
+      var b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      id = Array.prototype.map.call(b, function (x) { return ("0" + x.toString(16)).slice(-2); }).join("");
+      try { localStorage.setItem(key, id); } catch (e) { /* per-page-load id */ }
+    }
+    return "anon:" + persona + ":" + id;
+  }
+
   function sendAuth() {
-    Promise.resolve(cfg.getToken ? cfg.getToken() : cfg.token).then(function (token) {
+    var token = cfg.getToken ? cfg.getToken() : cfg.token || anonymousToken();
+    Promise.resolve(token).then(function (token) {
       if (token) post({ type: "toktok-auth", token: token, persona: persona });
       post({ type: "toktok-chat-visibility", open: isOpen });
     });

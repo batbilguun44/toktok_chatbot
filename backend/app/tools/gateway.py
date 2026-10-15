@@ -6,6 +6,7 @@ Every method takes the authenticated user's id, so ownership is checked here,
 not by the model.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
@@ -192,3 +193,32 @@ class MockTokTokGateway:
         rid = f"REQ-{len(self.merchant_requests) + 5001}"
         self.merchant_requests.append({"id": rid, "merchant_id": merchant_id, "type": request_type, **details})
         return rid
+
+
+_ANON_TOKEN = re.compile(r"^anon:(driver|client|customer):([A-Za-z0-9_-]{16,64})$")
+
+
+class AnonymousGateway:
+    """GATEWAY_MODE=faq_only: no TokTok API yet, so no personal data and no identity check.
+
+    The host page (widget.js) sends "anon:<persona>:<random id>"; the random id only keeps one
+    browser's conversation separate from another's. Personal-data tools are not registered in this
+    mode, so the methods below are never reached by the model. `demo` lets local demo tokens
+    (demo-driver, ...) keep working outside production.
+    """
+
+    def __init__(self, demo: MockTokTokGateway | None = None) -> None:
+        self.demo = demo
+
+    async def resolve_user(self, token: str) -> UserContext | None:
+        m = _ANON_TOKEN.match(token)
+        if m:
+            return UserContext(m.group(1), f"anon-{m.group(2)}", None)  # type: ignore[arg-type]
+        return await self.demo.resolve_user(token) if self.demo else None
+
+    async def _unavailable(self, *args: Any, **kwargs: Any) -> Any:
+        raise GatewayError("TokTok data is not connected yet (GATEWAY_MODE=faq_only)")
+
+    list_orders = get_order = change_address = switch_fulfillment = _unavailable
+    get_driver = get_driver_active_orders = get_merchant = get_settlement = _unavailable
+    create_merchant_request = _unavailable
