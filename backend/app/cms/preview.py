@@ -13,12 +13,13 @@ from app.memory.session import SessionState
 from app.orchestrator.graph import Services, _turn_context
 from app.personas.prompts import system_prompt
 from app.rag.knowledge_base import KnowledgeBase, LocalHybridIndex
-from app.routing.intents import RouteDecision
+from app.routing.router import route
 from app.tools.registry import ToolContext, ToolRegistry
 
 
 async def preview_answer(svc: Services, published, persona: str, question: str,
-                         overlay: DocVersion | None) -> dict[str, Any]:
+                         overlay: DocVersion | None, instructions: str | None = None) -> dict[str, Any]:
+    """`instructions` previews a draft of the operation-team instructions (default: published)."""
     docs = {d.id: d for d in published}
     if overlay:
         docs[overlay.doc_id] = overlay.to_doc()
@@ -35,10 +36,12 @@ async def preview_answer(svc: Services, published, persona: str, question: str,
     sources: dict[str, str] = {h.doc_id: h.doc_title for h in hits}
     ctx = ToolContext(user=user, session=session, gateway=svc.gateway, repo=svc.repo, kb=kb, settings=s,
                       user_ref="preview", emit=lambda k, d: None, sources=sources, escalated=[])
-    decision = RouteDecision(intent="other", confidence=1.0, safety="ok", language="mn_cyrillic",
-                             normalized_query=question, needs_clarification=False)
+    # Same router as live chat, so the detected language / intent hints match what users get.
+    decision, _ = await route(svc.llm, persona, question, [])  # type: ignore[arg-type]
     state = {"decision": decision, "user": user, "flags": [], "hits": hits, "pack": pack, "kb_updates": ""}
-    system = system_prompt(persona) + ("\n\n## Verified knowledge base\n" + pack.text if pack else "")
+    if instructions is None:
+        instructions = svc.instructions.get(persona)
+    system = system_prompt(persona, instructions, s.gateway_mode != "faq_only") + ("\n\n## Verified knowledge base\n" + pack.text if pack else "")
     result = await svc.llm.run_turn(
         system=system, history=[], user_text=question, turn_context=_turn_context(state),
         tools=tools.specs(persona), execute_tool=lambda n, i: tools.execute(ctx, n, i), emit=lambda k, d: None,

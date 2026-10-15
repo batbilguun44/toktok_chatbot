@@ -5,7 +5,8 @@ import ChatWindow from "@/components/ChatWindow";
 
 // Demo accounts served by the backend's mock TokTok gateway.
 const DEMO = [
-  { token: "demo-customer", persona: "customer", label: "Хэрэглэгч", who: "Болд · 2 идэвхтэй захиалга" },
+  // Customer chat is paused for now (backend still supports it); re-enable by uncommenting.
+  // { token: "demo-customer", persona: "customer", label: "Хэрэглэгч", who: "Болд · 2 идэвхтэй захиалга" },
   { token: "demo-driver", persona: "driver", label: "Хүргэгч", who: "Ганбаа · онлайн" },
   { token: "demo-driver-new", persona: "driver", label: "Шинэ хүргэгч", who: "Тэмүүлэн · onboarding дутуу" },
   { token: "demo-client", persona: "client", label: "Харилцагч", who: "Хаан Бууз ХХК · 2 салбар" },

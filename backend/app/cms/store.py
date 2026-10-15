@@ -125,8 +125,13 @@ def _row_to_version(r) -> DocVersion:
 
 
 class PostgresKnowledgeStore:
-    def __init__(self, pool) -> None:
+    """`prefix` selects the table pair: "kb" (knowledge) or "prompt" (bot instructions)."""
+
+    def __init__(self, pool, prefix: str = "kb") -> None:
+        if prefix not in ("kb", "prompt"):
+            raise ValueError(prefix)
         self.pool = pool
+        self.docs_t, self.vers_t = f"{prefix}_docs", f"{prefix}_versions"
 
     async def migrate_legacy(self) -> int:
         """Import docs edited through the pre-CMS admin API as published versions."""
@@ -148,25 +153,25 @@ class PostgresKnowledgeStore:
     async def get_doc(self, doc_id):
         async with self.pool.connection() as conn:
             r = await (await conn.execute(
-                "SELECT id, status, published_version, updated_at FROM kb_docs WHERE id = %s", (doc_id,))).fetchone()
+                f"SELECT id, status, published_version, updated_at FROM {self.docs_t} WHERE id = %s", (doc_id,))).fetchone()
         return DocRecord(r[0], r[1], r[2], r[3].isoformat()) if r else None
 
     async def list_docs(self):
         async with self.pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT id, status, published_version, updated_at FROM kb_docs ORDER BY id")).fetchall()
+                f"SELECT id, status, published_version, updated_at FROM {self.docs_t} ORDER BY id")).fetchall()
         return [DocRecord(r[0], r[1], r[2], r[3].isoformat()) for r in rows]
 
     async def versions(self, doc_id):
         async with self.pool.connection() as conn:
             rows = await (await conn.execute(
-                f"SELECT {_V_COLS} FROM kb_versions WHERE doc_id = %s ORDER BY version DESC", (doc_id,))).fetchall()
+                f"SELECT {_V_COLS} FROM {self.vers_t} WHERE doc_id = %s ORDER BY version DESC", (doc_id,))).fetchall()
         return [_row_to_version(r) for r in rows]
 
     async def latest_versions(self):
         async with self.pool.connection() as conn:
             rows = await (await conn.execute(
-                f"SELECT {_V_COLS} FROM kb_versions WHERE state IN ('published', 'draft', 'in_review', 'rejected')"
+                f"SELECT {_V_COLS} FROM {self.vers_t} WHERE state IN ('published', 'draft', 'in_review', 'rejected')"
             )).fetchall()
         out: dict[str, list[DocVersion]] = {}
         for r in rows:
@@ -176,8 +181,8 @@ class PostgresKnowledgeStore:
     async def insert_version(self, v):
         async with self.pool.connection() as conn:
             await conn.execute(
-                """
-                INSERT INTO kb_versions (doc_id, version, persona, title, body, tags, visibility, state, source,
+                f"""
+                INSERT INTO {self.vers_t} (doc_id, version, persona, title, body, tags, visibility, state, source,
                   author, reviewer, reviewed_at, review_comment)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
@@ -188,8 +193,8 @@ class PostgresKnowledgeStore:
     async def update_version(self, v):
         async with self.pool.connection() as conn:
             await conn.execute(
-                """
-                UPDATE kb_versions SET persona=%s, title=%s, body=%s, tags=%s, visibility=%s, state=%s,
+                f"""
+                UPDATE {self.vers_t} SET persona=%s, title=%s, body=%s, tags=%s, visibility=%s, state=%s,
                   reviewer=%s, reviewed_at=%s, review_comment=%s, updated_at=now()
                 WHERE doc_id=%s AND version=%s
                 """,
@@ -199,13 +204,13 @@ class PostgresKnowledgeStore:
 
     async def delete_version(self, doc_id, version):
         async with self.pool.connection() as conn:
-            await conn.execute("DELETE FROM kb_versions WHERE doc_id=%s AND version=%s", (doc_id, version))
+            await conn.execute(f"DELETE FROM {self.vers_t} WHERE doc_id=%s AND version=%s", (doc_id, version))
 
     async def upsert_doc(self, d):
         async with self.pool.connection() as conn:
             await conn.execute(
-                """
-                INSERT INTO kb_docs (id, status, published_version) VALUES (%s,%s,%s)
+                f"""
+                INSERT INTO {self.docs_t} (id, status, published_version) VALUES (%s,%s,%s)
                 ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,
                   published_version=EXCLUDED.published_version, updated_at=now()
                 """,
@@ -214,5 +219,5 @@ class PostgresKnowledgeStore:
 
     async def revision(self):
         async with self.pool.connection() as conn:
-            r = await (await conn.execute("SELECT count(*), max(updated_at) FROM kb_docs")).fetchone()
+            r = await (await conn.execute(f"SELECT count(*), max(updated_at) FROM {self.docs_t}")).fetchone()
         return f"{r[0]}:{r[1].isoformat() if r[1] else ''}"

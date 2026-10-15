@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-ROLES = ("operator", "editor", "approver", "admin")
+ROLES = ("operator", "admin")
 
 # role -> permissions. A user may hold several roles.
+# Operators answer handed-off chats and draft knowledge / bot-instruction changes;
+# an admin approves and publishes them (an admin may also publish their own change).
 PERMISSIONS: dict[str, set[str]] = {
-    "operator": {"handoff"},
-    "editor": {"kb.read", "kb.edit", "metrics.read", "insights.read"},
-    "approver": {"kb.read", "kb.edit", "kb.publish", "metrics.read", "insights.read", "insights.run"},
+    "operator": {"handoff", "kb.read", "kb.edit"},
     "admin": {
         "kb.read", "kb.edit", "kb.publish", "metrics.read", "insights.read", "insights.run",
         "handoff", "staff.manage", "audit.read",

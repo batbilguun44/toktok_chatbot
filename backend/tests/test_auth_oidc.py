@@ -80,16 +80,16 @@ def test_bootstrap_admin_logs_in_and_manages_staff(setup):
     assert idp.code_verifier  # PKCE verifier sent to the token endpoint
 
     h = {"X-Requested-With": "toktok-admin"}
-    assert client.put("/api/admin/staff/ana@toktok.mn", json={"roles": ["editor"]}, headers=h).status_code == 200
-    assert client.put("/api/admin/staff/boss@toktok.mn", json={"roles": ["editor"]}, headers=h).status_code == 400
+    assert client.put("/api/admin/staff/ana@toktok.mn", json={"roles": ["operator"]}, headers=h).status_code == 200
+    assert client.put("/api/admin/staff/boss@toktok.mn", json={"roles": ["operator"]}, headers=h).status_code == 400
     staff = {u["email"]: u for u in client.get("/api/admin/staff").json()}
-    assert staff["ana@toktok.mn"]["roles"] == ["editor"]
+    assert staff["ana@toktok.mn"]["roles"] == ["operator"]
 
-    # A registered editor can sign in; permissions follow the role.
+    # A registered operator can sign in; permissions follow the role.
     client.post("/api/auth/logout")
     sso(client, idp, {"email": "ana@toktok.mn", "email_verified": True})
     me = client.get("/api/auth/me").json()
-    assert me["roles"] == ["editor"] and "kb.publish" not in me["permissions"]
+    assert me["roles"] == ["operator"] and "kb.publish" not in me["permissions"]
     assert client.get("/api/admin/staff").status_code == 403
 
 

@@ -166,16 +166,16 @@ async def test_postgres_cms_staff_handoff_judge_insights():
         store, staff = PostgresKnowledgeStore(pool), PostgresStaffStore(pool)
         assert await store.migrate_legacy() == 1 and await store.migrate_legacy() == 0
 
-        await staff.upsert(StaffUser("Ed@TokTok.mn", "Ed", ["editor"]))
-        assert (await staff.get("ed@toktok.mn")).roles == ["editor"]
+        await staff.upsert(StaffUser("Ed@TokTok.mn", "Ed", ["operator"]))
+        assert (await staff.get("ed@toktok.mn")).roles == ["operator"]
         reindexed = []
 
         async def on_publish():
             reindexed.append(1)
 
         cms = CMSService(store, staff, on_publish)
-        ed = Principal("ed@toktok.mn", ["editor"], permissions_for(["editor"]), "sso")
-        lead = Principal("lead@toktok.mn", ["approver"], permissions_for(["approver"]), "sso")
+        ed = Principal("ed@toktok.mn", ["operator"], permissions_for(["operator"]), "sso")
+        lead = Principal("lead@toktok.mn", ["admin"], permissions_for(["admin"]), "sso")
         rev0 = await store.revision()
         await cms.save_draft(ed, "driver-new", DraftInput("driver", "Шинэ", "Шинэ агуулга 12345", ["a"]))
         v = await cms.submit(ed, "driver-new")

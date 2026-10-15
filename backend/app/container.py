@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.cms.service import CMSService
+from app.cms.service import CMSService, InstructionsService
 from app.cms.store import InMemoryKnowledgeStore, KnowledgeStore, PostgresKnowledgeStore
 from app.config import Settings
 from app.handoff.service import HandoffService, NoopNotifier, WebhookNotifier
@@ -16,6 +16,7 @@ from app.memory.session import InMemorySessionStore, RedisSessionStore, SessionS
 from app.observability.tracing import LangfuseTracer, NoopTracer, Tracer
 from app.orchestrator.graph import Services
 from app.orchestrator.service import ChatService
+from app.personas.prompts import DEFAULT_INSTRUCTIONS
 from app.rag.contextual import Contextualizer
 from app.rag.documents import load_directory
 from app.rag.embeddings import Embedder, VoyageEmbedder
@@ -25,7 +26,7 @@ from app.rag.vector import InMemoryVectorIndex, PgVectorIndex
 from app.staff.auth import OIDCClient, Signer
 from app.staff.store import InMemoryStaffStore, PostgresStaffStore, StaffStore
 from app.tools.definitions import build_registry
-from app.tools.gateway import MockTokTokGateway
+from app.tools.gateway import AnonymousGateway, MockTokTokGateway, TokTokGateway
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +39,12 @@ class Container:
     signer: Signer
     oidc: OIDCClient | None
     cms: CMSService = None  # type: ignore[assignment]
+    prompts: InstructionsService = None  # type: ignore[assignment]
     chat: ChatService = None  # type: ignore[assignment]
     _closers: list[Any] = field(default_factory=list)
     _kb_revision: str | None = None
     _kb_checked_at: float = 0.0
+    _prompt_revision: str | None = None
 
     async def reindex(self) -> dict[str, int]:
         rev = await self.cms.store.revision()
@@ -63,11 +66,26 @@ class Container:
         if await self.cms.store.revision() != self._kb_revision:
             log.info("knowledge revision changed; reindexing")
             await self.reindex()
+        if await self.prompts.store.revision() != self._prompt_revision:
+            log.info("bot instructions revision changed; reloading")
+            await self.reload_instructions()
+
+    async def reload_instructions(self) -> None:
+        rev = await self.prompts.store.revision()
+        self.services.instructions = await self.prompts.published()
+        self._prompt_revision = rev
 
     async def aclose(self) -> None:
         self.services.tracer.flush()
         for c in self._closers:
             await c()
+
+
+def _make_gateway(s: Settings) -> TokTokGateway:
+    if s.gateway_mode == "faq_only":
+        # Demo tokens keep the local demo pages working; production accepts anonymous users only.
+        return AnonymousGateway(demo=MockTokTokGateway() if s.env != "prod" else None)
+    return MockTokTokGateway()  # _check_prod keeps this out of production
 
 
 def _make_llm(s: Settings) -> LLMProvider:
@@ -76,6 +94,10 @@ def _make_llm(s: Settings) -> LLMProvider:
 
         log.warning("LLM_PROVIDER=fake: offline demo provider, not for production")
         return FakeProvider()
+    if s.llm_provider == "gemini":
+        from app.llm.gemini_provider import GeminiProvider
+
+        return GeminiProvider(s)
     from app.llm.anthropic_provider import AnthropicProvider
 
     return AnthropicProvider(s)
@@ -113,6 +135,9 @@ def _check_prod(s: Settings) -> None:
         raise RuntimeError("ENV=prod requires OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET for staff login")
     if s.llm_provider == "fake":
         raise RuntimeError("LLM_PROVIDER=fake is not allowed with ENV=prod")
+    if s.gateway_mode == "mock":
+        raise RuntimeError("GATEWAY_MODE=mock serves fake orders; use faq_only in production until "
+                           "the TokTok API gateway is implemented")
     if not s.database_url or not s.redis_url:
         raise RuntimeError("ENV=prod requires DATABASE_URL and REDIS_URL")
 
@@ -125,6 +150,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     repo: Repository
     staff: StaffStore
     kstore: KnowledgeStore
+    pstore: KnowledgeStore  # bot instructions (same versioned store, separate tables)
     if s.database_url:
         from psycopg_pool import AsyncConnectionPool
 
@@ -134,10 +160,12 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         pg = PostgresRepository(pool, s.embedding_dim)
         await pg.init_schema()
         repo, staff, kstore = pg, PostgresStaffStore(pool), PostgresKnowledgeStore(pool)
+        pstore = PostgresKnowledgeStore(pool, prefix="prompt")
         if migrated := await kstore.migrate_legacy():
             log.info("migrated %d legacy admin-edited docs into the CMS", migrated)
     else:
         repo, staff, kstore = InMemoryRepository(), InMemoryStaffStore(), InMemoryKnowledgeStore()
+        pstore = InMemoryKnowledgeStore()
 
     sessions: SessionStore
     if s.redis_url:
@@ -169,7 +197,8 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     notifier = (WebhookNotifier(s.handoff_webhook_url, s.handoff_webhook_secret)
                 if s.handoff_webhook_url else NoopNotifier())
     services = Services(
-        settings=s, llm=the_llm, kb=kb, tools=build_registry(), gateway=MockTokTokGateway(), repo=repo,
+        settings=s, llm=the_llm, kb=kb, tools=build_registry(personal_data=s.gateway_mode != "faq_only"),
+        gateway=_make_gateway(s), repo=repo,
         sessions=sessions, tracer=tracer, handoff=HandoffService(repo, staff, notifier),
     )
     oidc = (OIDCClient(s.oidc_issuer, s.oidc_client_id, s.oidc_client_secret, s.oidc_redirect_uri, s.oidc_scopes)
@@ -178,8 +207,12 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
     c = Container(settings=s, services=services, staff=staff, signer=Signer(s.staff_session_secret), oidc=oidc,
                   _closers=closers)
     c.cms = CMSService(kstore, staff, on_publish=c.reindex, four_eyes=s.cms_four_eyes)
+    c.prompts = InstructionsService(pstore, staff, on_publish=c.reload_instructions, four_eyes=s.cms_four_eyes)
     c.chat = ChatService(services, ensure_fresh=c.ensure_fresh)
     if seeded := await c.cms.seed_from_files(load_directory(s.knowledge_dir)):
         log.info("seeded %d knowledge docs from %s", seeded, s.knowledge_dir)
+    if seeded := await c.prompts.seed_defaults(DEFAULT_INSTRUCTIONS):
+        log.info("seeded default bot instructions for %d personas", seeded)
     await c.reindex()
+    await c.reload_instructions()
     return c

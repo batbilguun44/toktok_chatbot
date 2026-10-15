@@ -81,8 +81,8 @@ def staff_login(client, email, roles):
 
 
 def test_cms_workflow_end_to_end(client):
-    # Editor drafts and submits; approver publishes; chatbot search sees it immediately.
-    h = staff_login(client, "editor@toktok.mn", ["editor"])
+    # Operator drafts and submits; admin publishes; chatbot search sees it immediately.
+    h = staff_login(client, "editor@toktok.mn", ["operator"])
     body = {"persona": "driver", "title": "Өвлийн улиралд ажиллах заавар",
             "body": "## Гулгаа\nӨвлийн улиралд мөстэй зам дээр хурдаа 30 км/ц-аас хэтрүүлэхгүй."}
     assert client.put("/api/admin/kb/driver-winter/draft", json=body).status_code == 403  # CSRF header missing
@@ -91,7 +91,7 @@ def test_cms_workflow_end_to_end(client):
     assert client.post("/api/admin/kb/driver-winter/submit", headers=h).json()["state"] == "in_review"
     assert client.post("/api/admin/kb/driver-winter/versions/1/approve", json={}, headers=h).status_code == 403
 
-    h = staff_login(client, "lead@toktok.mn", ["approver"])
+    h = staff_login(client, "lead@toktok.mn", ["admin"])
     review = client.get("/api/admin/kb/review").json()
     assert [r["draft"]["doc_id"] for r in review] == ["driver-winter"]
     assert client.post("/api/admin/kb/driver-winter/versions/1/approve", json={"comment": "ok"},
@@ -117,7 +117,7 @@ def test_cms_workflow_end_to_end(client):
 
 
 def test_kb_import_csv_and_preview(client):
-    h = staff_login(client, "editor@toktok.mn", ["editor"])
+    h = staff_login(client, "editor@toktok.mn", ["operator"])
     csv = ("id,persona,question,answer,tags\n"
            'customer-promo-expired,customer,Промо код ажиллахгүй байна,"## Шалгах\n1. Кодын хугацааг шалгана.",промо\n'
            ",customer,Хоол хүйтэн ирсэн,Оператор шалгаж шийднэ. Захиалгын дугаараа бэлдээрэй.,гомдол\n"
@@ -163,3 +163,20 @@ def test_operator_handoff_round_trip(client):
                 headers=h)
     ev = chat(client, "demo-customer", "Баярлалаа", session_id=sid)
     assert any(e["type"] == "text" for e in ev)  # the bot is back
+
+
+def test_instruction_change_waits_for_admin_review(client):
+    h = staff_login(client, "op@toktok.mn", ["operator"])
+    body = {"body": "- Хэл: зөвхөн кирилл монголоор хариул.\n- Хамгийн богино хариулт өг."}
+    assert client.put("/api/admin/prompts/driver/draft", json=body, headers=h).status_code == 200
+    v = client.post("/api/admin/prompts/driver/submit", headers=h).json()["version"]
+    assert client.post(f"/api/admin/prompts/driver/versions/{v}/approve", json={}, headers=h).status_code == 403
+    assert client.get("/api/admin/staff").status_code == 403  # operators cannot manage staff
+
+    h = staff_login(client, "admin@toktok.mn", ["admin"])
+    queue = client.get("/api/admin/prompts-review").json()
+    assert [(q["draft"]["doc_id"], q["draft"]["author"]) for q in queue] == [("driver", "op@toktok.mn")]
+    assert queue[0]["published"]["version"] == 1  # diff base
+    r = client.post(f"/api/admin/prompts/driver/versions/{v}/approve", json={"comment": "ok"}, headers=h)
+    assert r.json()["state"] == "published"
+    assert client.get("/api/admin/prompts-review").json() == []

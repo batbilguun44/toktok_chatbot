@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.cms.store import OPEN_STATES, DocRecord, DocVersion, KnowledgeStore, now
+from app.personas.prompts import INSTRUCTIONS_MAX_CHARS
 from app.rag.documents import KnowledgeDoc
 from app.staff.auth import Principal
 from app.staff.store import StaffStore
@@ -32,12 +33,17 @@ class DraftInput:
 
 
 class CMSService:
+    audit_prefix = "kb"
+
     def __init__(self, store: KnowledgeStore, staff: StaffStore, on_publish: Callable[[], Awaitable[Any]],
                  four_eyes: bool = True):
         self.store = store
         self.staff = staff
         self.on_publish = on_publish  # re-index after the published set changes
         self.four_eyes = four_eyes
+
+    async def _audit(self, p: Principal, action: str, doc_id: str, details: dict[str, Any] | None = None) -> None:
+        await self.staff.audit(p.email, f"{self.audit_prefix}.{action}", doc_id, details)
 
     # ------------------------------------------------------------------ reads
     async def published_docs(self) -> list[KnowledgeDoc]:
@@ -103,14 +109,14 @@ class CMSService:
                            title=data.title, body=data.body, tags=data.tags, visibility=data.visibility,
                            state="draft", source=source, author=p.email, created_at=ts, updated_at=ts)
             await self.store.insert_version(v)
-        await self.staff.audit(p.email, "kb.save_draft", doc_id, {"version": v.version, "source": source})
+        await self._audit(p, "save_draft", doc_id, {"version": v.version, "source": source})
         return v
 
     async def submit(self, p: Principal, doc_id: str) -> DocVersion:
         v = await self._open(doc_id, ("draft", "rejected"))
         v.state, v.updated_at, v.review_comment = "in_review", now(), None
         await self.store.update_version(v)
-        await self.staff.audit(p.email, "kb.submit", doc_id, {"version": v.version})
+        await self._audit(p, "submit", doc_id, {"version": v.version})
         return v
 
     async def approve(self, p: Principal, doc_id: str, version: int, comment: str | None) -> DocVersion:
@@ -121,7 +127,7 @@ class CMSService:
             raise CMSError("a second person must approve your own change", 403)
         v.reviewer, v.reviewed_at, v.review_comment = p.email, now(), comment
         await self._publish(v)
-        await self.staff.audit(p.email, "kb.approve", doc_id, {"version": version, "comment": comment})
+        await self._audit(p, "approve", doc_id, {"version": version, "comment": comment})
         return v
 
     async def reject(self, p: Principal, doc_id: str, version: int, comment: str) -> DocVersion:
@@ -130,7 +136,7 @@ class CMSService:
             raise CMSError("only versions in review can be rejected", 409)
         v.state, v.reviewer, v.reviewed_at, v.review_comment = "rejected", p.email, now(), comment
         await self.store.update_version(v)
-        await self.staff.audit(p.email, "kb.reject", doc_id, {"version": version, "comment": comment})
+        await self._audit(p, "reject", doc_id, {"version": version, "comment": comment})
         return v
 
     async def discard(self, p: Principal, doc_id: str) -> None:
@@ -140,7 +146,7 @@ class CMSService:
         if d.published_version is None and not await self.store.versions(doc_id):
             d.status = "archived"
             await self.store.upsert_doc(d)
-        await self.staff.audit(p.email, "kb.discard_draft", doc_id, {"version": v.version})
+        await self._audit(p, "discard_draft", doc_id, {"version": v.version})
 
     async def rollback(self, p: Principal, doc_id: str, to_version: int) -> DocVersion:
         """Re-publish an old version as a new version (history is never rewritten)."""
@@ -155,7 +161,7 @@ class CMSService:
                        review_comment=f"rollback to v{to_version}")
         await self.store.insert_version(v)
         await self._publish(v)
-        await self.staff.audit(p.email, "kb.rollback", doc_id, {"to_version": to_version, "new_version": v.version})
+        await self._audit(p, "rollback", doc_id, {"to_version": to_version, "new_version": v.version})
         return v
 
     async def set_archived(self, p: Principal, doc_id: str, archived: bool) -> None:
@@ -164,7 +170,7 @@ class CMSService:
             raise CMSError("nothing published to restore", 409)
         d.status = "archived" if archived else "active"
         await self.store.upsert_doc(d)
-        await self.staff.audit(p.email, "kb.archive" if archived else "kb.restore", doc_id)
+        await self._audit(p, "archive" if archived else "restore", doc_id)
         await self.on_publish()
 
     async def import_rows(self, p: Principal, rows: list[dict[str, str]], submit: bool = True) -> dict[str, Any]:
@@ -274,3 +280,43 @@ _TRANSLIT = str.maketrans({
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", text.lower().translate(_TRANSLIT)).strip("-")
     return s[:60].rstrip("-") or "faq"
+
+
+class InstructionsService(CMSService):
+    """Operation-team bot instructions: one document per persona (id = persona), same
+    draft → review → publish → rollback workflow and audit trail as knowledge."""
+
+    audit_prefix = "prompt"
+    PERSONAS = ("driver", "client", "customer")
+
+    async def published(self) -> dict[str, str]:
+        """persona -> published instruction text."""
+        out = {}
+        for doc_id, vs in (await self.store.latest_versions()).items():
+            pub = next((v for v in vs if v.state == "published"), None)
+            if pub:
+                out[doc_id] = pub.body
+        return out
+
+    async def seed_defaults(self, defaults: dict[str, str]) -> int:
+        n = 0
+        for persona, text in defaults.items():
+            if await self.store.get_doc(persona):
+                continue
+            ts = now()
+            v = DocVersion(doc_id=persona, version=1, persona=persona, title=f"{persona} instructions",
+                           body=text.strip(), state="published", source="default", author="default",
+                           created_at=ts, updated_at=ts)
+            await self.store.insert_version(v)
+            await self.store.upsert_doc(DocRecord(id=persona, published_version=1))
+            n += 1
+        return n
+
+    async def set_archived(self, p: Principal, doc_id: str, archived: bool) -> None:
+        raise CMSError("bot instructions cannot be archived; publish a new version instead", 409)
+
+    def _validate(self, doc_id: str, d: DraftInput) -> None:
+        if doc_id not in self.PERSONAS or d.persona != doc_id:
+            raise CMSError(f"instructions exist per persona: {self.PERSONAS}")
+        if not 10 <= len(d.body.strip()) <= INSTRUCTIONS_MAX_CHARS:
+            raise CMSError(f"instructions: 10-{INSTRUCTIONS_MAX_CHARS} characters")

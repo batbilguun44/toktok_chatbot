@@ -1,16 +1,18 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AuditPanel, ImprovePanel, MetricsPanel, StaffPanel } from "@/components/admin/Panels";
 import Knowledge from "@/components/admin/Knowledge";
+import Prompts from "@/components/admin/Prompts";
 import Review from "@/components/admin/Review";
 import StaffGate from "@/components/StaffGate";
-import { Me } from "@/lib/api";
+import { Me, staffFetch } from "@/lib/api";
 
 const TABS = [
   { id: "metrics", label: "Үзүүлэлт", perm: "metrics.read" },
   { id: "knowledge", label: "Мэдлэгийн сан", perm: "kb.read" },
-  { id: "review", label: "Хянах", perm: "kb.read" },
+  { id: "review", label: "Хянах", perm: "kb.publish" },
+  { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
   { id: "improve", label: "Сайжруулалт", perm: "insights.read" },
   { id: "staff", label: "Ажилтнууд", perm: "staff.manage" },
   { id: "audit", label: "Аудит", perm: "audit.read" },
@@ -18,7 +20,7 @@ const TABS = [
 
 export default function Admin() {
   return (
-    <StaffGate permission="kb.read" title="ТокТок туслах · Operation" returnTo="/admin">
+    <StaffGate permission="staff.manage" title="ТокТок туслах · Админ" returnTo="/admin">
       {(me, logout) => <AdminShell me={me} logout={logout} />}
     </StaffGate>
   );
@@ -29,11 +31,21 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
   const [tab, setTab] = useState<string>(tabs[0]?.id ?? "knowledge");
   const [err, setErr] = useState<string | null>(null);
   const onErr = useCallback((e: string | null) => setErr(e), []);
+  // Pending approvals (knowledge + bot instructions), shown on the review tab.
+  const [pending, setPending] = useState(0);
+  useEffect(() => {
+    const count = () => Promise.all([staffFetch<unknown[]>("/api/admin/kb/review"),
+      staffFetch<unknown[]>("/api/admin/prompts-review")])
+      .then(([a, b]) => setPending(a.length + b.length)).catch(() => {});
+    count();
+    const t = setInterval(count, 15000);
+    return () => clearInterval(t);
+  }, [tab]);
 
   return (
     <main className="admin">
       <header className="admin-header">
-        <h1>ТокТок туслах · Operation</h1>
+        <h1>ТокТок туслах · Админ</h1>
         <div className="small">
           {me.email} · {me.roles.join(", ")}{" "}
           {me.permissions.includes("handoff") && <a href="/operator">Оператор</a>}{" "}
@@ -43,7 +55,7 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
       <nav className="tabs">
         {tabs.map((t) => (
           <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => { setTab(t.id); setErr(null); }}>
-            {t.label}
+            {t.label}{t.id === "review" && pending > 0 && <span className="count">{pending}</span>}
           </button>
         ))}
       </nav>
@@ -51,6 +63,7 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
       {tab === "metrics" && <MetricsPanel onErr={onErr} />}
       {tab === "knowledge" && <Knowledge me={me} onErr={onErr} />}
       {tab === "review" && <Review me={me} onErr={onErr} />}
+      {tab === "prompts" && <Prompts me={me} onErr={onErr} />}
       {tab === "improve" && <ImprovePanel me={me} onErr={onErr} />}
       {tab === "staff" && <StaffPanel onErr={onErr} />}
       {tab === "audit" && <AuditPanel onErr={onErr} />}

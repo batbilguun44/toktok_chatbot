@@ -140,11 +140,11 @@ export function ImprovePanel({ me, onErr }: { me: Me; onErr: (e: string | null) 
 }
 
 type Staff = { email: string; name: string | null; roles: string[]; active: boolean; last_login_at: string | null };
-const ROLE_MN: Record<string, string> = { operator: "Оператор", editor: "Засварлагч", approver: "Батлагч", admin: "Админ" };
+const ROLE_MN: Record<string, string> = { operator: "Оператор", admin: "Админ" };
 
 export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
   const [rows, setRows] = useState<Staff[]>([]);
-  const [form, setForm] = useState<{ email: string; roles: string[] }>({ email: "", roles: ["editor"] });
+  const [form, setForm] = useState<{ email: string; roles: string[] }>({ email: "", roles: ["operator"] });
   const load = useCallback(() => {
     staffFetch<Staff[]>("/api/admin/staff").then((x) => { setRows(x); onErr(null); }).catch((e) => onErr(String(e)));
   }, [onErr]);
@@ -184,7 +184,7 @@ export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
           <label key={r} className="chk"><input type="checkbox" checked={form.roles.includes(r)}
             onChange={() => setForm({ ...form, roles: toggle(form.roles, r) })} /> {ROLE_MN[r]}</label>
         ))}
-        <button onClick={() => { save(form.email.trim().toLowerCase(), form.roles); setForm({ email: "", roles: ["editor"] }); }}
+        <button onClick={() => { save(form.email.trim().toLowerCase(), form.roles); setForm({ email: "", roles: ["operator"] }); }}
                 disabled={!/^[^@\s]+@[^@\s]+$/.test(form.email) || !form.roles.length}>Нэмэх</button>
       </div>
     </section>

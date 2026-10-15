@@ -12,6 +12,7 @@ from app.cms.preview import preview_answer
 from app.cms.service import CMSError, DraftInput, parse_upload
 from app.container import Container
 from app.insights.loop import run_insights
+from app.personas.prompts import INSTRUCTIONS_MAX_CHARS, locked_prompt
 from app.staff.auth import Principal
 
 admin = APIRouter(prefix="/api/admin")
@@ -195,6 +196,112 @@ async def kb_reindex(p: Principal = Depends(require("kb.publish")), c: Container
     stats = await c.reindex()
     await c.staff.audit(p.email, "kb.reindex", None, stats)
     return stats
+
+
+# ------------------------------------------------------ bot instructions
+# One editable instruction document per persona (id = persona). Same rights as knowledge:
+# editors draft and submit, approvers publish / reject / roll back (four-eyes applies).
+@admin.get("/prompts")
+async def prompts_overview(_: Principal = Depends(require("kb.read")), c: Container = Depends(container)):
+    out = []
+    for persona in c.prompts.PERSONAS:
+        vs = await c.prompts.store.versions(persona)
+        pub = next((v for v in vs if v.state == "published"), None)
+        draft = next((v for v in vs if v.state in ("draft", "in_review", "rejected")), None)
+        out.append({"persona": persona, "locked": locked_prompt(persona),
+                    "published": pub.to_dict() if pub else None, "draft": draft.to_dict() if draft else None})
+    return {"personas": out, "max_chars": INSTRUCTIONS_MAX_CHARS}
+
+
+@admin.get("/prompts-review")
+async def prompts_review(_: Principal = Depends(require("kb.read")), c: Container = Depends(container)):
+    """Instruction drafts waiting for an admin (shown with knowledge drafts in the review tab)."""
+    return await c.prompts.review_queue()
+
+
+@admin.get("/prompts/{persona}")
+async def prompts_detail(persona: Persona, _: Principal = Depends(require("kb.read")),
+                         c: Container = Depends(container)):
+    try:
+        return await c.prompts.detail(persona)
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+class InstructionsIn(BaseModel):
+    body: str = Field(min_length=10, max_length=INSTRUCTIONS_MAX_CHARS)
+
+
+@admin.put("/prompts/{persona}/draft")
+async def prompts_save_draft(persona: Persona, body: InstructionsIn, p: Principal = Depends(require("kb.edit")),
+                             c: Container = Depends(container)):
+    try:
+        data = DraftInput(persona=persona, title=f"{persona} instructions", body=body.body, tags=[])
+        return (await c.prompts.save_draft(p, persona, data)).to_dict()
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+@admin.delete("/prompts/{persona}/draft")
+async def prompts_discard(persona: Persona, p: Principal = Depends(require("kb.edit")),
+                          c: Container = Depends(container)):
+    try:
+        await c.prompts.discard(p, persona)
+    except CMSError as e:
+        raise _cms_call(e)
+    return {"ok": True}
+
+
+@admin.post("/prompts/{persona}/submit")
+async def prompts_submit(persona: Persona, p: Principal = Depends(require("kb.edit")),
+                         c: Container = Depends(container)):
+    try:
+        return (await c.prompts.submit(p, persona)).to_dict()
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+@admin.post("/prompts/{persona}/versions/{version}/approve")
+async def prompts_approve(persona: Persona, version: int, body: ReviewIn,
+                          p: Principal = Depends(require("kb.publish")), c: Container = Depends(container)):
+    try:
+        return (await c.prompts.approve(p, persona, version, body.comment)).to_dict()
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+@admin.post("/prompts/{persona}/versions/{version}/reject")
+async def prompts_reject(persona: Persona, version: int, body: ReviewIn,
+                         p: Principal = Depends(require("kb.publish")), c: Container = Depends(container)):
+    if not body.comment:
+        raise HTTPException(400, "a rejection needs a comment for the author")
+    try:
+        return (await c.prompts.reject(p, persona, version, body.comment)).to_dict()
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+@admin.post("/prompts/{persona}/rollback")
+async def prompts_rollback(persona: Persona, body: RollbackIn, p: Principal = Depends(require("kb.publish")),
+                           c: Container = Depends(container)):
+    try:
+        return (await c.prompts.rollback(p, persona, body.to_version)).to_dict()
+    except CMSError as e:
+        raise _cms_call(e)
+
+
+class InstructionsPreviewIn(BaseModel):
+    persona: Persona
+    question: str = Field(min_length=2, max_length=1000)
+    # Text to try (e.g. the unsaved editor content); omitted = published instructions.
+    body: str | None = Field(default=None, max_length=INSTRUCTIONS_MAX_CHARS)
+
+
+@admin.post("/prompts-preview")
+async def prompts_preview(body: InstructionsPreviewIn, _: Principal = Depends(require("kb.read")),
+                          c: Container = Depends(container)):
+    return await preview_answer(c.services, await c.cms.published_docs(), body.persona, body.question, None,
+                                instructions=body.body)
 
 
 # ------------------------------------------------------- metrics & evaluation
