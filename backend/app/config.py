@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # CLASSIFIER_MODEL to Gemini model ids).
     llm_provider: Literal["anthropic", "gemini", "fake"] = "anthropic"
     gemini_api_key: str | None = None
+    # TypeSafe "Jev" decision model: evaluation only for now (scripts/compare_router.py).
+    typesafe_api_key: str | None = None
+    jev_model: str = "jev-latest"
     # TokTok data access for tools:
     #   mock     : demo accounts and fake orders (development / demos)
     #   faq_only : phase 1 before TokTok's API exists. No personal-data tools at all (the bot answers

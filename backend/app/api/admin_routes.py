@@ -12,16 +12,22 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import container, require
 from app.cms.preview import preview_answer
+from app.cms.quality import CONFLICT_CHECK_MAX, Candidate, find_conflicts, find_similar
 from app.cms.service import CMSError, DraftInput, parse_upload
 from app.container import Container
 from app.insights.loop import run_insights
+from app.llm.base import LLMError
 from app.memory.repository import EXPORT_COLUMNS, ConversationFilter
 from app.orchestrator.graph import UB_TZ
+from app.routing.intents import intents_for
+from app.tools.definitions import ESCALATION_CATEGORIES
 from app.personas.prompts import INSTRUCTIONS_MAX_CHARS, locked_prompt
 from app.staff.auth import Principal
 
 admin = APIRouter(prefix="/api/admin")
 Persona = Literal["driver", "client", "customer"]
+USAGE_DAYS = 90    # knowledge usage window shown in the list
+STALE_DAYS = 180   # a published document older than this is flagged for review
 
 
 def _cms_call(e: CMSError):
@@ -32,10 +38,14 @@ def _cms_call(e: CMSError):
 @admin.get("/kb")
 async def kb_overview(_: Principal = Depends(require("kb.read")), c: Container = Depends(container)):
     rows = await c.cms.overview()
+    usage = await c.services.repo.kb_usage(time.time() - USAGE_DAYS * 86400)
+    for r in rows:
+        r["usage"] = usage.get(r["id"], {"uses": 0, "negative": 0, "last_used": None})
     modes = {p: c.services.kb.mode_for(p) for p in ("driver", "client", "customer")}
     tokens = {p: pk.est_tokens for p, pk in c.services.kb.packs.items()}
     return {"docs": rows, "modes": modes, "est_tokens": tokens,
-            "full_context_max_tokens": c.settings.full_context_max_tokens}
+            "full_context_max_tokens": c.settings.full_context_max_tokens,
+            "usage_days": USAGE_DAYS, "stale_days": STALE_DAYS}
 
 
 @admin.get("/kb/review")
@@ -196,6 +206,62 @@ async def kb_search(body: SearchIn, _: Principal = Depends(require("kb.read")), 
              "text": h.text} for h in hits]
 
 
+@admin.get("/kb-find")
+async def kb_find(q: str, persona: Persona | None = None, _: Principal = Depends(require("kb.read")),
+                  c: Container = Depends(container)):
+    """Find documents by their content: exact words (titles + bodies, drafts and internal docs included)
+    and by meaning (the bot's own search: Latin/Cyrillic spellings, related wording; published docs)."""
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    found: dict[str, dict] = {}
+    for v in await c.cms.store.find_text(q, 50):
+        if persona and v.persona not in (persona, "all"):
+            continue
+        i = v.body.lower().find(q.lower())
+        snippet = v.body[max(0, i - 60): i + len(q) + 100] if i >= 0 else v.body[:160]
+        found.setdefault(v.doc_id, {"doc_id": v.doc_id, "title": v.title, "snippet": snippet.strip(),
+                                    "match": ["text"], "score": 1.0})
+    for p in ([persona] if persona else ["driver", "client", "customer"]):
+        for h in await c.services.kb.search(q, p, k=8):
+            row = found.setdefault(h.doc_id, {"doc_id": h.doc_id, "title": h.doc_title, "snippet": h.text[:220],
+                                              "match": [], "score": 0.0})
+            if "meaning" not in row["match"]:
+                row["match"].append("meaning")
+    return sorted(found.values(), key=lambda r: (-len(r["match"]), -r["score"]))[:30]
+
+
+class QualityIn(BaseModel):
+    persona: Literal["driver", "client", "customer", "all"]
+    title: str = ""
+    body: str = Field(min_length=1, max_length=50_000)
+    doc_id: str | None = None  # the document being edited (excluded from the comparison)
+
+
+@admin.post("/kb-similar")
+async def kb_similar(body: QualityIn, _: Principal = Depends(require("kb.read")), c: Container = Depends(container)):
+    """Possible duplicates of a draft (no AI call; shown while editing and in review)."""
+    return find_similar(body.persona, body.title, body.body, await c.cms.candidates(), exclude_id=body.doc_id)
+
+
+@admin.post("/kb-conflicts")
+async def kb_conflicts(body: QualityIn, _: Principal = Depends(require("kb.read")),
+                       c: Container = Depends(container)):
+    """AI check: does the draft contradict the most similar documents (amounts, deadlines, steps)?"""
+    cands = await c.cms.candidates()
+    similar = find_similar(body.persona, body.title, body.body, cands, exclude_id=body.doc_id,
+                           limit=CONFLICT_CHECK_MAX)
+    by_id: dict[str, Candidate] = {}
+    for cand in cands:  # prefer the published wording of each similar document
+        if cand.doc_id in {s["doc_id"] for s in similar} and (cand.doc_id not in by_id or cand.state == "published"):
+            by_id[cand.doc_id] = cand
+    try:
+        conflicts = await find_conflicts(c.services.llm, body.title, body.body, list(by_id.values()))
+    except LLMError as e:
+        raise HTTPException(503, f"AI шалгалт одоогоор боломжгүй байна: {e}")
+    return {"checked": [s["doc_id"] for s in similar], "conflicts": conflicts}
+
+
 @admin.post("/kb-reindex")
 async def kb_reindex(p: Principal = Depends(require("kb.publish")), c: Container = Depends(container)):
     stats = await c.reindex()
@@ -216,6 +282,33 @@ async def prompts_overview(_: Principal = Depends(require("kb.read")), c: Contai
         out.append({"persona": persona, "locked": locked_prompt(persona),
                     "published": pub.to_dict() if pub else None, "draft": draft.to_dict() if draft else None})
     return {"personas": out, "max_chars": INSTRUCTIONS_MAX_CHARS}
+
+
+@admin.get("/review-history")
+async def review_history(limit: int = 100, _: Principal = Depends(require("kb.publish")),
+                         c: Container = Depends(container)):
+    """Past review decisions on knowledge and bot instructions, from the audit log (a rejected draft that
+    was edited afterwards is still listed): who wrote it, who decided, when, and the comment."""
+    actions = [f"{k}.{a}" for k in ("kb", "prompt") for a in ("approve", "reject", "rollback")]
+    entries = await c.staff.list_audit(max(1, min(limit, 500)), actions=actions)
+    versions: dict[tuple[str, str], dict[int, Any]] = {}
+    rows = []
+    for e in entries:
+        kind, decision = e["action"].split(".")
+        store = c.cms.store if kind == "kb" else c.prompts.store
+        key = (kind, e["target"])
+        if key not in versions:
+            versions[key] = {v.version: v for v in await store.versions(e["target"])}
+        detail = e.get("detail") or {}
+        n = detail.get("new_version") if decision == "rollback" else detail.get("version")
+        v = versions[key].get(n)
+        rows.append({
+            "kind": kind, "doc_id": e["target"], "decision": decision, "version": n,
+            "to_version": detail.get("to_version"), "reviewer": e["actor"], "at": e["created_at"],
+            "comment": detail.get("comment"), "title": v.title if v else e["target"],
+            "persona": v.persona if v else None, "author": v.author if v and decision != "rollback" else None,
+        })
+    return rows
 
 
 @admin.get("/prompts-review")
@@ -310,9 +403,13 @@ async def prompts_preview(body: InstructionsPreviewIn, _: Principal = Depends(re
 
 
 # ------------------------------------------------------------- conversations
-def _conv_filter(persona: Persona | None, escalated: bool | None, negative: bool | None, q: str | None,
-                 date_from: str | None, date_to: str | None, limit: int = 50, offset: int = 0) -> ConversationFilter:
-    """Dates are YYYY-MM-DD in Ulaanbaatar time; date_to is inclusive."""
+# Operators and admins read stored conversations; only admins export them.
+def conv_filter(persona: Persona | None = None, escalated: bool | None = None, negative: bool | None = None,
+                q: str | None = None, intent: str | None = None, category: str | None = None,
+                assignee: str | None = None, handoff_status: Literal["open", "resolved"] | None = None,
+                errors: bool | None = None, date_from: str | None = None, date_to: str | None = None,
+                limit: int = 50, offset: int = 0) -> ConversationFilter:
+    """Query-string filters shared by list and export. Dates are YYYY-MM-DD in Ulaanbaatar time; date_to is inclusive."""
     def day(s: str | None, plus: int = 0) -> float | None:
         if not s:
             return None
@@ -322,39 +419,47 @@ def _conv_filter(persona: Persona | None, escalated: bool | None, negative: bool
             raise HTTPException(400, "dates must be YYYY-MM-DD")
         return (d + timedelta(days=plus)).timestamp()
     return ConversationFilter(persona=persona, escalated=escalated, negative_feedback=negative,
-                              q=(q or "").strip() or None, since_epoch=day(date_from), until_epoch=day(date_to, 1),
+                              q=(q or "").strip() or None, intent=intent or None, category=category or None,
+                              assignee=assignee or None, handoff_status=handoff_status, errors_only=errors,
+                              since_epoch=day(date_from), until_epoch=day(date_to, 1),
                               limit=max(1, min(limit, 200)), offset=max(0, offset))
 
 
 @admin.get("/conversations")
-async def conversations(persona: Persona | None = None, escalated: bool | None = None, negative: bool | None = None,
-                        q: str | None = None, date_from: str | None = None, date_to: str | None = None,
-                        limit: int = 50, offset: int = 0, _: Principal = Depends(require("metrics.read")),
-                        c: Container = Depends(container)):
-    return await c.services.repo.list_conversations(
-        _conv_filter(persona, escalated, negative, q, date_from, date_to, limit, offset))
+async def conversations(f: ConversationFilter = Depends(conv_filter),
+                        _: Principal = Depends(require("conversations.read")), c: Container = Depends(container)):
+    return await c.services.repo.list_conversations(f)
+
+
+@admin.get("/conversation-facets")
+async def conversation_facets(_: Principal = Depends(require("conversations.read")),
+                              c: Container = Depends(container)):
+    """Choices for the filter dropdowns (topics per persona, escalation reasons, operators)."""
+    staff = await c.staff.list_all()
+    return {
+        "intents": {p: intents_for(p) for p in ("driver", "client", "customer")},
+        "categories": list(ESCALATION_CATEGORIES),
+        "operators": sorted(u.email for u in staff if {"operator", "admin"} & set(u.roles)),
+    }
 
 
 @admin.get("/conversations.csv")
-async def conversations_csv(persona: Persona | None = None, escalated: bool | None = None,
-                            negative: bool | None = None, q: str | None = None, date_from: str | None = None,
-                            date_to: str | None = None, p: Principal = Depends(require("metrics.read")),
+async def conversations_csv(f: ConversationFilter = Depends(conv_filter),
+                            p: Principal = Depends(require("conversations.export")),
                             c: Container = Depends(container)):
     """Every turn of the matching conversations, one row per question/answer (UTF-8 with BOM for Excel)."""
-    rows = await c.services.repo.export_turns(_conv_filter(persona, escalated, negative, q, date_from, date_to))
+    rows = await c.services.repo.export_turns(f)
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=EXPORT_COLUMNS)
     w.writeheader()
     w.writerows(rows)
-    await c.staff.audit(p.email, "conversations.export", None, {"rows": len(rows), "persona": persona,
-                                                                 "from": date_from, "to": date_to})
-    name = f"toktok-chats-{date_from or 'all'}-{date_to or 'now'}.csv"
+    await c.staff.audit(p.email, "conversations.export", None, {"rows": len(rows), "persona": f.persona})
     return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv",
-                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+                    headers={"Content-Disposition": 'attachment; filename="toktok-chats.csv"'})
 
 
 @admin.get("/conversations/{conversation_id}")
-async def conversation_detail(conversation_id: str, _: Principal = Depends(require("metrics.read")),
+async def conversation_detail(conversation_id: str, _: Principal = Depends(require("conversations.read")),
                               c: Container = Depends(container)):
     log = await c.services.repo.conversation_log(conversation_id)
     if not log:

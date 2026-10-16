@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Badge, PERSONA_MN, when } from "@/components/admin/common";
+import { Badge, CATEGORY_MN, PERSONA_MN, when } from "@/components/admin/common";
+import Conversations from "@/components/admin/Conversations";
 import Knowledge from "@/components/admin/Knowledge";
 import Prompts from "@/components/admin/Prompts";
 import StaffGate from "@/components/StaffGate";
@@ -12,11 +13,6 @@ type Esc = { id: string; conversation_id: string; persona: string; category: str
 type Msg = { id: number; sender: string; author: string | null; text: string; created_at: string };
 type Detail = { escalation: Esc; transcript: { role: string; text: string }[]; messages: Msg[] };
 
-const CATEGORY_MN: Record<string, string> = {
-  user_requested: "Хүн хүссэн", not_in_knowledge: "Мэдлэгт алга", needs_human_decision: "Шийдвэр хэрэгтэй",
-  incident: "Яаралтай", complaint: "Гомдол", account_security: "Аюулгүй байдал", sales_manager: "Борлуулалт",
-  technical_issue: "Техникийн",
-};
 
 export default function OperatorPage() {
   return (
@@ -31,6 +27,7 @@ const AREAS = [
   { id: "chat", label: "Чат", perm: "handoff" },
   { id: "knowledge", label: "Мэдлэгийн сан", perm: "kb.read" },
   { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
+  { id: "history", label: "Түүх", perm: "conversations.read" },
 ] as const;
 
 function Console({ me, logout }: { me: Me; logout: () => void }) {
@@ -39,6 +36,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
   // (even for admins), so the knowledge / instruction editors here never show those controls.
   const drafter = { ...me, permissions: me.permissions.filter((p) => p !== "kb.publish") };
   const [area, setArea] = useState<(typeof AREAS)[number]["id"]>("chat");
+  const [openDoc, setOpenDoc] = useState<string | null>(null); // knowledge doc opened from history
   const [view, setView] = useState<"queued" | "mine" | "resolved">("queued");
   const [rows, setRows] = useState<Esc[]>([]);
   const [sel, setSel] = useState<string | null>(null);
@@ -132,8 +130,10 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
         ))}
       </nav>
       {err && <div className="alert">{err}</div>}
-      {area === "knowledge" && <Knowledge me={drafter} onErr={setErr} />}
+      {area === "knowledge" && <Knowledge me={drafter} onErr={setErr} openDoc={openDoc} />}
       {area === "prompts" && <Prompts me={drafter} onErr={setErr} />}
+      {area === "history" && <Conversations onErr={setErr} canExport={false}
+        onOpenDoc={(id) => { setOpenDoc(id); setArea("knowledge"); }} />}
       {area === "chat" && <div className="op-grid">
         <aside>
           <nav className="tabs">

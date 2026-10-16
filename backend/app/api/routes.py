@@ -77,6 +77,15 @@ async def handoff_updates(session_id: str, after: int = 0, user: UserContext = D
         raise HTTPException(403, "session belongs to another user")
 
 
+@router.post("/chat/handoff/close")
+async def close_handoff(session_id: str, user: UserContext = Depends(current_user), c: Container = Depends(container)):
+    """The user starts a new chat: close their open operator request (it disappears from the queue)."""
+    try:
+        return {"closed": await c.chat.close_handoff(user, session_id)}
+    except SessionForbidden:
+        raise HTTPException(403, "session belongs to another user")
+
+
 @router.get("/me")
 async def me(user: UserContext = Depends(current_user)):
     return {"persona": user.persona, "display_name": user.display_name}

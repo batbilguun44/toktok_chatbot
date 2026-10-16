@@ -137,6 +137,13 @@ class ChatService:
         open_esc = await self.svc.handoff.is_open(session.handoff_id) if session.handoff_id else None
         return {"messages": msgs[-limit:], "handoff": {"active": bool(open_esc), "last_id": last_id}}
 
+    async def close_handoff(self, user: UserContext, session_id: str) -> bool:
+        """User pressed "new chat" during an open operator handoff."""
+        session = await self._load_session(user, session_id, create=False)
+        if not session or not await self.svc.handoff.is_open(session.handoff_id):
+            return False
+        return await self.svc.handoff.user_left(session.handoff_id)
+
     async def handoff_updates(self, user: UserContext, session_id: str, after_id: int) -> dict[str, Any]:
         """Polled by the chat UI while an operator is handling the conversation."""
         session = await self._load_session(user, session_id, create=False)

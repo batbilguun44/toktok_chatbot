@@ -80,6 +80,15 @@ export async function pollHandoff(token: string, sessionId: string, after: numbe
   return res.json();
 }
 
+/** Close the user's open operator request (they started a new chat). Best effort. */
+export async function closeHandoff(token: string, sessionId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/chat/handoff/close?session_id=${encodeURIComponent(sessionId)}`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch { /* the operator can still close it from the console */ }
+}
+
 export async function sendFeedback(token: string, turnId: string, rating: 1 | -1, comment?: string) {
   await fetch(`${API_BASE}/api/feedback`, {
     method: "POST",

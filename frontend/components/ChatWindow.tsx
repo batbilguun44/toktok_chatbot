@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { chatHistory, pollHandoff, sendFeedback, streamChat } from "@/lib/api";
+import { chatHistory, closeHandoff, pollHandoff, sendFeedback, streamChat } from "@/lib/api";
 import RichText from "./RichText";
 
 type Msg = {
@@ -87,7 +87,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
 
   useEffect(() => {
     try {
-      sessionRef.current = sessionStorage.getItem(storageKey);
+      sessionRef.current = localStorage.getItem(storageKey);
     } catch {
       sessionRef.current = null;
     }
@@ -132,7 +132,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           case "meta":
             if (ev.data.session_id) {
               sessionRef.current = ev.data.session_id;
-              try { sessionStorage.setItem(storageKey, ev.data.session_id); } catch {}
+              try { localStorage.setItem(storageKey, ev.data.session_id); } catch {}
             }
             if (ev.data.turn_id) patch(botId, (m) => ({ ...m, turnId: ev.data.turn_id }));
             break;
@@ -158,7 +158,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           case "error":
             if (ev.data.code === "forbidden") {
               sessionRef.current = null;
-              try { sessionStorage.removeItem(storageKey); } catch {}
+              try { localStorage.removeItem(storageKey); } catch {}
             }
             patch(botId, (m) => ({ ...m, text: ev.data.message, error: true, status: undefined }));
             break;
@@ -186,9 +186,16 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
     await sendFeedback(token, m.turnId, rating);
   }
 
-  function newConversation() {
+  async function newConversation() {
+    // An open operator request would stay in the queue and the operator's replies would go nowhere:
+    // confirm, then close it on the server before starting over.
+    const sid = sessionRef.current;
+    if (handoff.active && sid) {
+      if (!window.confirm("Ажилтантай яриа нээлттэй байна. Шинэ яриа эхлүүлбэл энэ хүсэлт хаагдана. Үргэлжлүүлэх үү?")) return;
+      await closeHandoff(token, sid);
+    }
     sessionRef.current = null;
-    try { sessionStorage.removeItem(storageKey); } catch {}
+    try { localStorage.removeItem(storageKey); } catch {}
     setMessages([]);
     lastIdRef.current = 0;
     setHandoff({ active: false, lastId: 0 });

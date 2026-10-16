@@ -63,7 +63,12 @@ class ConversationFilter:
     persona: str | None = None
     escalated: bool | None = None
     negative_feedback: bool | None = None  # only conversations with a 👎
-    q: str | None = None                   # substring of a user or bot message
+    q: str | None = None                   # substring of a message, conversation id or ticket number
+    intent: str | None = None              # router topic of any turn
+    category: str | None = None            # escalation reason
+    assignee: str | None = None            # operator who handled a handoff
+    handoff_status: str | None = None      # "open" (queued/active) | "resolved"
+    errors_only: bool | None = None        # a turn the bot could not finish (stop != "end")
     since_epoch: float | None = None
     until_epoch: float | None = None
     limit: int = 50
@@ -73,6 +78,32 @@ class ConversationFilter:
 EXPORT_COLUMNS = ["conversation_id", "turn_id", "created_at", "persona", "intent", "intent_confidence",
                   "user_text", "bot_text", "sources", "tools", "stop", "model", "latency_ms", "rating",
                   "conversation_escalated"]
+
+
+def _handoff_summary(escs: list[dict[str, Any]]) -> dict[str, Any]:
+    """List columns for a conversation's escalations (latest last)."""
+    statuses = {e["status"] for e in escs}
+    return {
+        "handoff_status": "open" if statuses & set(OPEN_HANDOFF) else "resolved" if statuses else None,
+        "categories": sorted({e["category"] for e in escs}),
+        "assignees": sorted({e["assignee"] for e in escs if e.get("assignee")}),
+        "tickets": [e["id"] for e in escs],
+    }
+
+
+def _conv_matches(f: "ConversationFilter", c: dict[str, Any], intents: set[str],
+                  escs: list[dict[str, Any]], text: str) -> bool:
+    """In-memory twin of PostgresRepository._conv_where (same semantics)."""
+    return not (
+        (f.escalated is not None and c["escalated"] != f.escalated)
+        or (f.negative_feedback and not c["negative_feedback"])
+        or (f.errors_only and not c["errors"])
+        or (f.intent and f.intent not in intents)
+        or (f.category and f.category not in c["categories"])
+        or (f.assignee and f.assignee not in c["assignees"])
+        or (f.handoff_status and c["handoff_status"] != f.handoff_status)
+        or (f.q and f.q.lower() not in text)
+    )
 
 
 def _export_row(t: dict[str, Any], escalated: bool) -> dict[str, Any]:
@@ -124,7 +155,7 @@ class Repository(Protocol):
     async def get_escalation(self, escalation_id: str) -> dict[str, Any] | None: ...
     async def list_escalations(self, status: str | None, limit: int, assignee: str | None = None) -> list[dict[str, Any]]: ...
     async def claim(self, escalation_id: str, operator: str) -> bool: ...
-    async def resolve(self, escalation_id: str, operator: str, note: str | None) -> bool: ...
+    async def resolve(self, escalation_id: str, operator: str | None, note: str | None) -> bool: ...
     async def add_handoff_message(self, escalation_id: str, sender: str, text: str, author: str | None = None) -> int: ...
     async def list_handoff_messages(self, escalation_id: str, after_id: int = 0) -> list[dict[str, Any]]: ...
 
@@ -132,6 +163,9 @@ class Repository(Protocol):
     async def list_conversations(self, f: "ConversationFilter") -> dict[str, Any]: ...
     async def conversation_log(self, conversation_id: str) -> dict[str, Any] | None: ...
     async def export_turns(self, f: "ConversationFilter") -> list[dict[str, Any]]: ...
+    async def kb_usage(self, since_epoch: float) -> dict[str, dict[str, Any]]:
+        """doc_id -> {uses, negative, last_used}: answers that relied on the document, 👎 among them."""
+        ...
 
     # improvement loop / online evals
     async def candidate_questions(self, since_epoch: float, limit: int) -> list[dict[str, Any]]: ...
@@ -280,22 +314,23 @@ class InMemoryRepository:
             c = convs.setdefault(t["conversation_id"], {
                 "id": t["conversation_id"], "persona": t["persona"], "started_at": t["created_at"],
                 "last_at": t["created_at"], "turns": 0, "escalated": False, "preview": t["user_text"],
-                "negative_feedback": 0, "_text": ""})
+                "negative_feedback": 0, "errors": 0, "_text": t["conversation_id"], "_intents": set()})
             c["turns"] += 1
             c["last_at"] = t["created_at"]
-            c["escalated"] |= t["escalated"] or any(e["conversation_id"] == c["id"] for e in self.escalations)
+            c["escalated"] |= bool(t["escalated"])
             c["negative_feedback"] += int(t["rating"] == -1)
+            c["errors"] += int(t.get("stop") not in (None, "end"))
             c["_text"] += f"\n{t['user_text']}\n{t['bot_text']}"
+            if t.get("intent"):
+                c["_intents"].add(t["intent"])
         out = []
         for c in convs.values():
-            if f.escalated is not None and c["escalated"] != f.escalated:
-                continue
-            if f.negative_feedback and not c["negative_feedback"]:
-                continue
-            if f.q and f.q.lower() not in c["_text"].lower():
-                continue
-            c.pop("_text")
-            out.append(c)
+            escs = [e for e in self.escalations if e["conversation_id"] == c["id"]]
+            c.update(_handoff_summary(escs))
+            c["escalated"] |= bool(escs)
+            text = (c.pop("_text") + "\n" + "\n".join(e["id"] for e in escs)).lower()
+            if _conv_matches(f, c, c.pop("_intents"), escs, text):
+                out.append(c)
         return sorted(out, key=lambda c: c["last_at"], reverse=True)
 
     async def list_conversations(self, f: ConversationFilter) -> dict[str, Any]:
@@ -311,6 +346,19 @@ class InMemoryRepository:
         ids = {e["id"] for e in escs}
         msgs = [dict(m) for m in self.messages if m["escalation_id"] in ids]
         return {"conversation": conv, "events": merge_events(turns, escs, msgs)}
+
+    async def kb_usage(self, since_epoch: float) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for t in self.turns:
+            if t.created_at < since_epoch:
+                continue
+            neg = self.feedback.get(t.id, (None,))[0] == -1
+            for doc in dict.fromkeys(t.sources):
+                u = out.setdefault(doc, {"uses": 0, "negative": 0, "last_used": None})
+                u["uses"] += 1
+                u["negative"] += int(neg)
+                u["last_used"] = max(u["last_used"] or "", _iso(t.created_at))
+        return out
 
     async def export_turns(self, f: ConversationFilter) -> list[dict[str, Any]]:
         keep = {c["id"]: c for c in self._conversations(ConversationFilter(**{**f.__dict__, "limit": 10**9,
@@ -504,6 +552,15 @@ class PostgresRepository:
 
     # ------------------------------------------------ conversation history
     _CONV_ESCALATED = "(c.escalated OR EXISTS (SELECT 1 FROM escalations e WHERE e.conversation_id = c.id))"
+    _CONV_ERRORS = ("(SELECT count(*) FROM turns te WHERE te.conversation_id = c.id "
+                    "AND te.stop IS NOT NULL AND te.stop <> 'end')")
+    _CONV_HANDOFF = ("(CASE WHEN EXISTS (SELECT 1 FROM escalations eo WHERE eo.conversation_id = c.id "
+                     "AND eo.status IN ('queued', 'active')) THEN 'open' "
+                     "WHEN EXISTS (SELECT 1 FROM escalations er WHERE er.conversation_id = c.id) THEN 'resolved' END)")
+    _CONV_LISTS = ("ARRAY(SELECT DISTINCT category FROM escalations e WHERE e.conversation_id = c.id ORDER BY 1), "
+                   "ARRAY(SELECT DISTINCT assignee FROM escalations e WHERE e.conversation_id = c.id "
+                   "AND assignee IS NOT NULL ORDER BY 1), "
+                   "ARRAY(SELECT id FROM escalations e WHERE e.conversation_id = c.id ORDER BY created_at)")
 
     def _conv_where(self, f: ConversationFilter, time_col: str = "c.started_at") -> tuple[str, list[Any]]:
         sql, args = ["TRUE"], []
@@ -517,9 +574,24 @@ class PostgresRepository:
             sql.append("EXISTS (SELECT 1 FROM turns t2 JOIN feedback f2 ON f2.turn_id = t2.id "
                        "WHERE t2.conversation_id = c.id AND f2.rating = -1)")
         if f.q:
-            sql.append("EXISTS (SELECT 1 FROM turns t3 WHERE t3.conversation_id = c.id "
-                       "AND (t3.user_text ILIKE %s OR t3.bot_text ILIKE %s))")
-            args += [f"%{f.q}%"] * 2
+            sql.append("(c.id ILIKE %s OR EXISTS (SELECT 1 FROM turns t3 WHERE t3.conversation_id = c.id "
+                       "AND (t3.user_text ILIKE %s OR t3.bot_text ILIKE %s)) "
+                       "OR EXISTS (SELECT 1 FROM escalations e3 WHERE e3.conversation_id = c.id AND e3.id ILIKE %s))")
+            args += [f"%{f.q}%"] * 4
+        if f.intent:
+            sql.append("EXISTS (SELECT 1 FROM turns t4 WHERE t4.conversation_id = c.id AND t4.intent = %s)")
+            args.append(f.intent)
+        if f.errors_only:
+            sql.append(f"{self._CONV_ERRORS} > 0")
+        if f.category:
+            sql.append("EXISTS (SELECT 1 FROM escalations e4 WHERE e4.conversation_id = c.id AND e4.category = %s)")
+            args.append(f.category)
+        if f.assignee:
+            sql.append("EXISTS (SELECT 1 FROM escalations e5 WHERE e5.conversation_id = c.id AND e5.assignee = %s)")
+            args.append(f.assignee)
+        if f.handoff_status:
+            sql.append(f"{self._CONV_HANDOFF} = %s")
+            args.append(f.handoff_status)
         if f.since_epoch:
             sql.append(f"{time_col} >= %s")
             args.append(datetime.fromtimestamp(f.since_epoch, tz=timezone.utc))
@@ -536,14 +608,17 @@ class PostgresRepository:
                 f"""SELECT c.id, c.persona, c.started_at, c.last_at, c.turns, {self._CONV_ESCALATED},
                       (SELECT user_text FROM turns t WHERE t.conversation_id = c.id ORDER BY created_at LIMIT 1),
                       (SELECT count(*) FROM turns t JOIN feedback fb ON fb.turn_id = t.id
-                        WHERE t.conversation_id = c.id AND fb.rating = -1)
+                        WHERE t.conversation_id = c.id AND fb.rating = -1),
+                      {self._CONV_ERRORS}, {self._CONV_HANDOFF}, {self._CONV_LISTS}
                     FROM conversations c WHERE {where}
                     ORDER BY c.last_at DESC LIMIT %s OFFSET %s""",
                 [*args, f.limit, f.offset],
             )).fetchall()
         return {"total": total, "items": [
             {"id": r[0], "persona": r[1], "started_at": _iso(r[2]), "last_at": _iso(r[3]), "turns": r[4],
-             "escalated": r[5], "preview": r[6] or "", "negative_feedback": r[7]} for r in rows]}
+             "escalated": r[5], "preview": r[6] or "", "negative_feedback": r[7], "errors": r[8],
+             "handoff_status": r[9], "categories": list(r[10]), "assignees": list(r[11]), "tickets": list(r[12])}
+            for r in rows]}
 
     async def conversation_log(self, conversation_id: str) -> dict[str, Any] | None:
         page = await self._conv_page(conversation_id)
@@ -577,10 +652,22 @@ class PostgresRepository:
     async def _conv_page(self, conversation_id: str) -> dict[str, Any] | None:
         async with self.pool.connection() as conn:
             r = await (await conn.execute(
-                f"""SELECT c.id, c.persona, c.started_at, c.last_at, c.turns, {self._CONV_ESCALATED}
+                f"""SELECT c.id, c.persona, c.started_at, c.last_at, c.turns, {self._CONV_ESCALATED},
+                           {self._CONV_ERRORS}, {self._CONV_HANDOFF}, {self._CONV_LISTS}
                     FROM conversations c WHERE c.id = %s""", (conversation_id,))).fetchone()
         return {"id": r[0], "persona": r[1], "started_at": _iso(r[2]), "last_at": _iso(r[3]), "turns": r[4],
-                "escalated": r[5]} if r else None
+                "escalated": r[5], "errors": r[6], "handoff_status": r[7], "categories": list(r[8]),
+                "assignees": list(r[9]), "tickets": list(r[10])} if r else None
+
+    async def kb_usage(self, since_epoch: float) -> dict[str, dict[str, Any]]:
+        since = datetime.fromtimestamp(since_epoch, tz=timezone.utc)
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute(
+                """SELECT s.doc, count(*), count(*) FILTER (WHERE fb.rating = -1), max(t.created_at)
+                   FROM turns t CROSS JOIN LATERAL (SELECT DISTINCT jsonb_array_elements_text(t.sources) AS doc) s
+                   LEFT JOIN feedback fb ON fb.turn_id = t.id
+                   WHERE t.created_at >= %s GROUP BY s.doc""", (since,))).fetchall()
+        return {r[0]: {"uses": r[1], "negative": r[2], "last_used": _iso(r[3])} for r in rows}
 
     async def export_turns(self, f: ConversationFilter) -> list[dict[str, Any]]:
         where, args = self._conv_where(f, time_col="t.created_at")

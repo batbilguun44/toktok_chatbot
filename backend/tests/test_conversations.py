@@ -57,8 +57,25 @@ async def _check(c, llm):
         await c.chat.history(other, sid)
 
     # /admin list + filters + detail + export
+    llm.intent = "branch_visibility"
     _, sid2, _ = await turn(c, "demo-client", "Салбар харагдахгүй байна")
+    llm.intent = "other"
     r = c.services.repo
+
+    async def items(**kw):
+        return (await r.list_conversations(ConversationFilter(**kw)))["items"]
+
+    async def ids(**kw):
+        return [x["id"] for x in await items(**kw)]
+
+    assert await ids(intent="branch_visibility") == [sid2]
+    assert await ids(category="user_requested") == [sid] and await ids(assignee="op@toktok.mn") == [sid]
+    assert await ids(handoff_status="open") == [sid] and await ids(handoff_status="resolved") == []
+    assert await ids(errors_only=True) == []
+    assert await ids(q=esc_id) == [sid] and await ids(q=sid2[:12]) == [sid2]
+    row = next(x for x in await items() if x["id"] == sid)
+    assert row["handoff_status"] == "open" and row["categories"] == ["user_requested"]
+    assert row["assignees"] == ["op@toktok.mn"] and row["tickets"] == [esc_id] and row["errors"] == 0
     assert {x["id"] for x in (await r.list_conversations(ConversationFilter()))["items"]} == {sid, sid2}
     only = (await r.list_conversations(ConversationFilter(escalated=True)))["items"]
     assert [x["id"] for x in only] == [sid] and only[0]["preview"].startswith("Бонус")
@@ -109,7 +126,12 @@ def test_csv_endpoint_and_admin_only(monkeypatch):
         assert r.status_code == 200
         h = {"X-Requested-With": "toktok-admin"}
         client.post("/api/auth/dev-login", json={"email": "op@toktok.mn", "roles": ["operator"]})
-        assert client.get("/api/admin/conversations").status_code == 403
+        assert client.get("/api/admin/conversations").json()["total"] == 1  # operators read history…
+        assert client.get("/api/admin/conversations.csv").status_code == 403  # …but cannot export it
+        facets = client.get("/api/admin/conversation-facets").json()
+        assert "branch_visibility" in facets["intents"]["client"] and "incident" in facets["categories"]
+        assert "op@toktok.mn" in facets["operators"]
+        assert client.get("/api/admin/conversations?handoff_status=bogus").status_code == 422
         client.post("/api/auth/dev-login", json={"email": "boss@toktok.mn", "roles": ["admin"]})
         assert client.get("/api/admin/conversations").json()["total"] == 1
         assert client.get("/api/admin/conversations?date_from=2026-13-01").status_code == 400

@@ -165,6 +165,25 @@ def test_operator_handoff_round_trip(client):
     assert any(e["type"] == "text" for e in ev)  # the bot is back
 
 
+def test_new_chat_closes_open_handoff(client):
+    ev = chat(client, "demo-customer", "operatortoi holbogdmoor baina")
+    sid = ev[0]["data"]["session_id"]
+    tid = next(e for e in ev if e["type"] == "escalation")["data"]["ticket_id"]
+    user = {"Authorization": "Bearer demo-customer"}
+    # Someone else cannot close it.
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid},
+                       headers={"Authorization": "Bearer demo-driver"}).status_code == 403
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid}, headers=user).json() == {"closed": True}
+
+    h = staff_login(client, "op@toktok.mn", ["operator"])
+    assert client.get("/api/operator/queue").json() == []  # gone from the queue
+    detail = client.get(f"/api/operator/handoffs/{tid}").json()
+    assert "шинэ яриа" in detail["messages"][-1]["text"]
+    assert client.post(f"/api/operator/handoffs/{tid}/messages", json={"text": "Сайн уу"}, headers=h).status_code == 409
+    # Closing again is a no-op.
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid}, headers=user).json() == {"closed": False}
+
+
 def test_instruction_change_waits_for_admin_review(client):
     h = staff_login(client, "op@toktok.mn", ["operator"])
     body = {"body": "- Хэл: зөвхөн кирилл монголоор хариул.\n- Хамгийн богино хариулт өг."}
