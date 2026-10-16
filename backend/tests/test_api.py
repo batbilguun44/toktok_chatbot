@@ -10,7 +10,7 @@ from app.config import get_settings
 
 @pytest.fixture
 def client(monkeypatch):
-    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "ADMIN_API_KEY": "test-admin",
+    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "QDRANT_URL": "", "ADMIN_API_KEY": "test-admin",
                  "EMBEDDING_PROVIDER": "none", "LANGFUSE_PUBLIC_KEY": "", "RATE_LIMIT_PER_MINUTE": "5",
                  "STAFF_SESSION_SECRET": "s" * 40, "JUDGE_SAMPLE_RATE": "0"}.items():
         monkeypatch.setenv(k, v)
@@ -163,6 +163,25 @@ def test_operator_handoff_round_trip(client):
                 headers=h)
     ev = chat(client, "demo-customer", "Баярлалаа", session_id=sid)
     assert any(e["type"] == "text" for e in ev)  # the bot is back
+
+
+def test_new_chat_closes_open_handoff(client):
+    ev = chat(client, "demo-customer", "operatortoi holbogdmoor baina")
+    sid = ev[0]["data"]["session_id"]
+    tid = next(e for e in ev if e["type"] == "escalation")["data"]["ticket_id"]
+    user = {"Authorization": "Bearer demo-customer"}
+    # Someone else cannot close it.
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid},
+                       headers={"Authorization": "Bearer demo-driver"}).status_code == 403
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid}, headers=user).json() == {"closed": True}
+
+    h = staff_login(client, "op@toktok.mn", ["operator"])
+    assert client.get("/api/operator/queue").json() == []  # gone from the queue
+    detail = client.get(f"/api/operator/handoffs/{tid}").json()
+    assert "шинэ яриа" in detail["messages"][-1]["text"]
+    assert client.post(f"/api/operator/handoffs/{tid}/messages", json={"text": "Сайн уу"}, headers=h).status_code == 409
+    # Closing again is a no-op.
+    assert client.post("/api/chat/handoff/close", params={"session_id": sid}, headers=user).json() == {"closed": False}
 
 
 def test_instruction_change_waits_for_admin_review(client):

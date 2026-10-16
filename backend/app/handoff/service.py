@@ -103,6 +103,16 @@ class HandoffService:
         await self.staff.audit(p.email, "handoff.resolve", escalation_id, {"note": note})
         await self.notifier.notify("handoff.resolved", {"escalation_id": escalation_id, "operator": p.email})
 
+    async def user_left(self, escalation_id: str) -> bool:
+        """The user started a new chat while waiting for / talking to an operator: close the request so it
+        does not stay in the queue with replies nobody will see. No assignee is set if nobody claimed it."""
+        if not await self.repo.resolve(escalation_id, None, "Хэрэглэгч шинэ яриа эхлүүлсэн"):
+            return False
+        await self.repo.add_handoff_message(escalation_id, "system",
+                                            "Хэрэглэгч шинэ яриа эхлүүлж, энэ яриаг орхисон. Хүсэлт хаагдлаа.")
+        await self.notifier.notify("handoff.user_left", {"escalation_id": escalation_id})
+        return True
+
     async def transcript_for_bot(self, escalation_id: str) -> str:
         """Operator conversation, appended to the bot's history after handback."""
         e = await self.repo.get_escalation(escalation_id)

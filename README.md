@@ -108,6 +108,8 @@ docker compose up --build
 ```bash
 cd backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 LLM_PROVIDER=fake uvicorn app.main:app --port 8000   # DB/Redis/Qdrant 未設定ならインメモリ
+# Windows で DATABASE_URL を使う場合: psycopg は Proactor ループ非対応のため
+#   uvicorn app.main:app --port 8000 --loop asyncio:SelectorEventLoop
 cd frontend && npm install && npm run dev
 ```
 

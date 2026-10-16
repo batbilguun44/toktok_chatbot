@@ -58,12 +58,35 @@ export type HandoffPoll = {
   messages: { id: number; sender: "operator" | "system"; text: string; created_at: string }[];
 };
 
+export type ChatHistory = {
+  messages: { id: string; role: "user" | "assistant" | "operator" | "system"; text: string; turn_id?: string;
+    rating?: 1 | -1 | null; escalation?: { ticket_id: string; phone: string; mode?: string } }[];
+  handoff: { active: boolean; last_id: number };
+};
+
+/** The user's own conversation so far (restores the chat window after a reload). */
+export async function chatHistory(token: string, sessionId: string): Promise<ChatHistory | null> {
+  const res = await fetch(`${API_BASE}/api/chat/history?session_id=${encodeURIComponent(sessionId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.ok ? res.json() : null;
+}
+
 export async function pollHandoff(token: string, sessionId: string, after: number): Promise<HandoffPoll> {
   const res = await fetch(`${API_BASE}/api/chat/handoff?session_id=${encodeURIComponent(sessionId)}&after=${after}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) return { active: false, messages: [] };
   return res.json();
+}
+
+/** Close the user's open operator request (they started a new chat). Best effort. */
+export async function closeHandoff(token: string, sessionId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/chat/handoff/close?session_id=${encodeURIComponent(sessionId)}`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch { /* the operator can still close it from the console */ }
 }
 
 export async function sendFeedback(token: string, turnId: string, rating: 1 | -1, comment?: string) {

@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Badge, PERSONA_MN, when } from "@/components/admin/common";
+import { Badge, CATEGORY_MN, PERSONA_MN, when } from "@/components/admin/common";
+import Conversations from "@/components/admin/Conversations";
 import Knowledge from "@/components/admin/Knowledge";
 import Prompts from "@/components/admin/Prompts";
 import StaffGate from "@/components/StaffGate";
@@ -12,11 +13,6 @@ type Esc = { id: string; conversation_id: string; persona: string; category: str
 type Msg = { id: number; sender: string; author: string | null; text: string; created_at: string };
 type Detail = { escalation: Esc; transcript: { role: string; text: string }[]; messages: Msg[] };
 
-const CATEGORY_MN: Record<string, string> = {
-  user_requested: "Хүн хүссэн", not_in_knowledge: "Мэдлэгт алга", needs_human_decision: "Шийдвэр хэрэгтэй",
-  incident: "Яаралтай", complaint: "Гомдол", account_security: "Аюулгүй байдал", sales_manager: "Борлуулалт",
-  technical_issue: "Техникийн",
-};
 
 export default function OperatorPage() {
   return (
@@ -31,6 +27,7 @@ const AREAS = [
   { id: "chat", label: "Чат", perm: "handoff" },
   { id: "knowledge", label: "Мэдлэгийн сан", perm: "kb.read" },
   { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
+  { id: "history", label: "Түүх", perm: "conversations.read" },
 ] as const;
 
 function Console({ me, logout }: { me: Me; logout: () => void }) {
@@ -39,6 +36,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
   // (even for admins), so the knowledge / instruction editors here never show those controls.
   const drafter = { ...me, permissions: me.permissions.filter((p) => p !== "kb.publish") };
   const [area, setArea] = useState<(typeof AREAS)[number]["id"]>("chat");
+  const [openDoc, setOpenDoc] = useState<string | null>(null); // knowledge doc opened from history
   const [view, setView] = useState<"queued" | "mine" | "resolved">("queued");
   const [rows, setRows] = useState<Esc[]>([]);
   const [sel, setSel] = useState<string | null>(null);
@@ -80,6 +78,19 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [detail?.messages.length]);
 
+  const alerts = useQueueAlerts(me.permissions.includes("handoff"));
+  // A user writing in the open conversation while this tab is in the background.
+  const lastUserMsg = useRef<number | null>(null);
+  useEffect(() => {
+    const users = detail?.messages.filter((m) => m.sender === "user") ?? [];
+    const latest = users.length ? users[users.length - 1].id : 0;
+    if (lastUserMsg.current !== null && latest > lastUserMsg.current && document.hidden) {
+      alerts.notify("Хэрэглэгч бичлээ", users[users.length - 1].text);
+    }
+    lastUserMsg.current = latest;
+  }, [detail?.messages, alerts]);
+  useEffect(() => { lastUserMsg.current = null; }, [sel]);
+
   async function act(path: string, body?: object) {
     try {
       await staffFetch(`/api/operator/handoffs/${sel}${path}`, { method: "POST", body: JSON.stringify(body ?? {}) });
@@ -106,24 +117,30 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
       <header className="admin-header">
         <h1>Операторын самбар</h1>
         <div className="small">{me.email} {me.permissions.includes("staff.manage") && <a href="/admin">Админ</a>}{" "}
+          {alerts.permission === "default" && (
+            <button className="ghost" onClick={alerts.enable}>🔔 Мэдэгдэл асаах</button>
+          )}{" "}
           <button className="ghost" onClick={logout}>Гарах</button></div>
       </header>
       <nav className="tabs">
         {areas.map((a) => (
           <button key={a.id} className={area === a.id ? "active" : ""} onClick={() => { setArea(a.id); setErr(null); }}>
-            {a.label}
+            {a.label}{a.id === "chat" && alerts.queued > 0 && <span className="count">{alerts.queued}</span>}
           </button>
         ))}
       </nav>
       {err && <div className="alert">{err}</div>}
-      {area === "knowledge" && <Knowledge me={drafter} onErr={setErr} />}
+      {area === "knowledge" && <Knowledge me={drafter} onErr={setErr} openDoc={openDoc} />}
       {area === "prompts" && <Prompts me={drafter} onErr={setErr} />}
+      {area === "history" && <Conversations onErr={setErr} canExport={false}
+        onOpenDoc={(id) => { setOpenDoc(id); setArea("knowledge"); }} />}
       {area === "chat" && <div className="op-grid">
         <aside>
           <nav className="tabs">
             {(["queued", "mine", "resolved"] as const).map((v) => (
               <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
                 {{ queued: "Хүлээгдэж буй", mine: "Миний", resolved: "Шийдсэн" }[v]}
+                {v === "queued" && alerts.queued > 0 && <span className="count">{alerts.queued}</span>}
               </button>
             ))}
           </nav>
@@ -185,4 +202,73 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
       </div>}
     </main>
   );
+}
+
+/**
+ * New handoffs must not wait unnoticed: polls the waiting queue on every operator tab and, when a new
+ * conversation arrives, beeps, shows a browser notification (after the operator allows it) and puts
+ * the count in the tab title.
+ */
+function useQueueAlerts(enabled: boolean) {
+  const [queued, setQueued] = useState(0);
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">("unsupported");
+  const seen = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    setPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
+  }, []);
+
+  const notify = useCallback((title: string, body: string) => {
+    beep();
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const n = new Notification(title, { body: body.slice(0, 140), tag: "toktok-operator" });
+      n.onclick = () => { window.focus(); n.close(); };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const base = document.title.replace(/^\(\d+\)\s*/, "");
+    let stopped = false;
+    const check = async () => {
+      try {
+        const rows = await staffFetch<Esc[]>("/api/operator/queue?status=queued");
+        if (stopped) return;
+        const fresh = seen.current ? rows.filter((r) => !seen.current!.has(r.id)) : [];
+        seen.current = new Set(rows.map((r) => r.id));
+        setQueued(rows.length);
+        document.title = rows.length ? `(${rows.length}) ${base}` : base;
+        if (fresh.length) {
+          notify(fresh.length > 1 ? `${fresh.length} шинэ яриа` : "Шинэ яриа ирлээ",
+            `${PERSONA_MN[fresh[0].persona] ?? fresh[0].persona}: ${fresh[0].summary}`);
+        }
+      } catch { /* shown by the queue panel */ }
+    };
+    check();
+    const t = setInterval(check, 5000);
+    return () => { stopped = true; clearInterval(t); document.title = base; };
+  }, [enabled, notify]);
+
+  const enable = useCallback(async () => {
+    if (typeof Notification === "undefined") return;
+    setPermission(await Notification.requestPermission());
+    beep();
+  }, []);
+
+  return { queued, permission, enable, notify };
+}
+
+function beep() {
+  try {
+    const ctx = new AudioContext();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.15, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+    o.connect(g).connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + 0.4);
+    o.onended = () => ctx.close();
+  } catch { /* audio blocked until the page has been interacted with */ }
 }

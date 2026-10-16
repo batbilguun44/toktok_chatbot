@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # CLASSIFIER_MODEL to Gemini model ids).
     llm_provider: Literal["anthropic", "gemini", "fake"] = "anthropic"
     gemini_api_key: str | None = None
+    # TypeSafe "Jev" decision model: evaluation only for now (scripts/compare_router.py).
+    typesafe_api_key: str | None = None
+    jev_model: str = "jev-latest"
     # TokTok data access for tools:
     #   mock     : demo accounts and fake orders (development / demos)
     #   faq_only : phase 1 before TokTok's API exists. No personal-data tools at all (the bot answers
@@ -122,6 +125,10 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     max_message_chars: int = 2000
     rate_limit_per_minute: int = 20
+    # Per client IP across all users: anonymous users (GATEWAY_MODE=faq_only) can mint new ids, so this caps
+    # abuse and AI cost. Generous because mobile carriers put many users behind one IP (CGNAT). Behind a load
+    # balancer run uvicorn with --proxy-headers and FORWARDED_ALLOW_IPS so the real client IP is seen. 0 = off.
+    rate_limit_per_ip_per_minute: int = 120
 
     # --- Observability (Langfuse) ---------------------------------------
     langfuse_public_key: str | None = None

@@ -58,6 +58,7 @@ class CMSService:
 
     async def overview(self) -> list[dict[str, Any]]:
         latest = await self.store.latest_versions()
+        creators = await self.store.first_authors()
         rows = []
         for d in await self.store.list_docs():
             vs = latest.get(d.id, [])
@@ -70,9 +71,26 @@ class CMSService:
                 "visibility": head.visibility if head else None,
                 "draft": {"version": draft.version, "state": draft.state, "author": draft.author,
                           "source": draft.source, "updated_at": draft.updated_at} if draft else None,
-                "updated_at": d.updated_at,
+                "updated_at": (head.updated_at if head else None) or d.updated_at,
+                # who added it / who touched it last, topics, when the live version was published
+                "created_by": creators.get(d.id), "last_editor": head.author if head else None,
+                "tags": head.tags if head else [],
+                "published_at": (pub.reviewed_at or pub.updated_at) if pub else None,
             })
         return rows
+
+    async def candidates(self) -> list["Candidate"]:
+        """Published and in-progress documents (active only) for duplicate / contradiction checks."""
+        from app.cms.quality import Candidate
+
+        active = {d.id for d in await self.store.list_docs() if d.status == "active"}
+        out = []
+        for doc_id, vs in (await self.store.latest_versions()).items():
+            if doc_id not in active:
+                continue
+            for v in vs:
+                out.append(Candidate(v.doc_id, v.title, v.body, v.persona, v.state, v.author))
+        return out
 
     async def review_queue(self) -> list[dict[str, Any]]:
         out = []

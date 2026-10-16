@@ -58,3 +58,25 @@ def test_production_refuses_fake_data(settings):
     with pytest.raises(RuntimeError, match="GATEWAY_MODE=mock"):
         _check_prod(prod)
     _check_prod(prod.model_copy(update={"gateway_mode": "faq_only"}))  # allowed
+
+
+def test_ip_limit_stops_rotating_anonymous_ids(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import create_app
+
+    for k, v in {"LLM_PROVIDER": "fake", "DATABASE_URL": "", "REDIS_URL": "", "QDRANT_URL": "",
+                 "GATEWAY_MODE": "faq_only", "RATE_LIMIT_PER_MINUTE": "100", "RATE_LIMIT_PER_IP_PER_MINUTE": "3",
+                 "STAFF_SESSION_SECRET": "s" * 40, "JUDGE_SAMPLE_RATE": "0"}.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        codes = []
+        for i in range(4):  # a new anonymous id every time, same IP
+            token = f"anon:driver:{i:032d}"
+            r = client.post("/api/chat/stream", json={"message": "Сайн байна уу"},
+                            headers={"Authorization": f"Bearer {token}"})
+            codes.append("rate_limited" in r.text)
+        assert codes == [False, False, False, True]
+    get_settings.cache_clear()

@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { pollHandoff, sendFeedback, streamChat } from "@/lib/api";
+import { chatHistory, closeHandoff, pollHandoff, sendFeedback, streamChat } from "@/lib/api";
+import RichText from "./RichText";
 
 type Msg = {
   id: string;
@@ -53,6 +54,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
   useEffect(() => {
     if (!handoff.active) return;
     let stopped = false;
+    let unlinked = 0; // polls that found no handoff on the session at all
     const tick = async () => {
       const sid = sessionRef.current;
       if (!sid || stopped) return;
@@ -67,7 +69,13 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           ...r.messages.map((m) => ({ id: `h${m.id}`, role: m.sender, text: m.text }) as Msg),
         ]);
       }
-      if (!r.active) setHandoff({ active: false, lastId: lastIdRef.current });
+      // Stop only when the operator closed the ticket. "No handoff on this session" can also mean the
+      // turn that created it has not been saved yet, so tolerate a few of those before giving up.
+      if (r.status === "resolved" || (!r.active && !r.status && ++unlinked > 5)) {
+        setHandoff({ active: false, lastId: lastIdRef.current });
+      } else if (r.status) {
+        unlinked = 0;
+      }
     };
     tick();
     const t = setInterval(tick, 3000);
@@ -79,14 +87,28 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
 
   useEffect(() => {
     try {
-      sessionRef.current = sessionStorage.getItem(storageKey);
+      sessionRef.current = localStorage.getItem(storageKey);
     } catch {
       sessionRef.current = null;
     }
     setMessages([]);
     lastIdRef.current = 0;
     setHandoff({ active: false, lastId: 0 });
-  }, [storageKey]);
+    // After a reload, show the conversation so far and resume an open operator handoff.
+    const sid = sessionRef.current;
+    if (!sid) return;
+    let cancelled = false;
+    chatHistory(token, sid).then((h) => {
+      if (cancelled || !h || sessionRef.current !== sid) return;
+      setMessages((ms) => (ms.length ? ms : h.messages.map((m) => ({
+        id: m.id, role: m.role, text: m.text, turnId: m.turn_id, escalation: m.escalation,
+        rating: m.rating ?? undefined,
+      }))));
+      lastIdRef.current = h.handoff.last_id;
+      if (h.handoff.active) setHandoff({ active: true, lastId: h.handoff.last_id });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [storageKey, token]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
@@ -98,6 +120,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
     setBusy(true);
     setInput("");
     const botId = crypto.randomUUID();
+    let liveHandoff = false;
     setMessages((ms) => [
       ...ms,
       { id: crypto.randomUUID(), role: "user", text },
@@ -109,7 +132,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           case "meta":
             if (ev.data.session_id) {
               sessionRef.current = ev.data.session_id;
-              try { sessionStorage.setItem(storageKey, ev.data.session_id); } catch {}
+              try { localStorage.setItem(storageKey, ev.data.session_id); } catch {}
             }
             if (ev.data.turn_id) patch(botId, (m) => ({ ...m, turnId: ev.data.turn_id }));
             break;
@@ -121,7 +144,8 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
             break;
           case "escalation":
             patch(botId, (m) => ({ ...m, escalation: ev.data }));
-            if (ev.data.mode === "inchat") setHandoff({ active: true, lastId: lastIdRef.current });
+            // Start polling once the turn is saved ("done"), or the first poll finds no handoff yet.
+            if (ev.data.mode === "inchat") liveHandoff = true;
             break;
           case "handoff":
             // Delivered to the operator: no bot reply for this message.
@@ -134,12 +158,13 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           case "error":
             if (ev.data.code === "forbidden") {
               sessionRef.current = null;
-              try { sessionStorage.removeItem(storageKey); } catch {}
+              try { localStorage.removeItem(storageKey); } catch {}
             }
             patch(botId, (m) => ({ ...m, text: ev.data.message, error: true, status: undefined }));
             break;
           case "done":
             patch(botId, (m) => ({ ...m, status: undefined }));
+            if (liveHandoff) setHandoff((h) => (h.active ? h : { active: true, lastId: lastIdRef.current }));
             break;
         }
       }
@@ -161,9 +186,16 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
     await sendFeedback(token, m.turnId, rating);
   }
 
-  function newConversation() {
+  async function newConversation() {
+    // An open operator request would stay in the queue and the operator's replies would go nowhere:
+    // confirm, then close it on the server before starting over.
+    const sid = sessionRef.current;
+    if (handoff.active && sid) {
+      if (!window.confirm("Ажилтантай яриа нээлттэй байна. Шинэ яриа эхлүүлбэл энэ хүсэлт хаагдана. Үргэлжлүүлэх үү?")) return;
+      await closeHandoff(token, sid);
+    }
     sessionRef.current = null;
-    try { sessionStorage.removeItem(storageKey); } catch {}
+    try { localStorage.removeItem(storageKey); } catch {}
     setMessages([]);
     lastIdRef.current = 0;
     setHandoff({ active: false, lastId: 0 });
@@ -205,7 +237,9 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
           <div key={m.id} className={`row ${m.role}`}>
             <div className={`bubble ${m.role} ${m.error ? "error" : ""}`}>
               {m.role === "operator" && <div className="who">Оператор</div>}
-              {m.text && <div className="text">{m.text}</div>}
+              {m.text && (m.role === "assistant" || m.role === "operator"
+                ? <RichText text={m.text} />
+                : <div className="text">{m.text}</div>)}
               {m.status && <div className="status"><span className="dot" />{m.status}</div>}
               {m.escalation && (
                 <div className="escalation">
