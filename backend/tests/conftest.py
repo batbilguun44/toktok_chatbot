@@ -1,6 +1,13 @@
+import asyncio
+import sys
+
 import pytest
 
 from app.config import Settings
+
+# psycopg's async driver cannot run on Windows' default Proactor loop (storage integration tests).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from app.container import build_container
 
 

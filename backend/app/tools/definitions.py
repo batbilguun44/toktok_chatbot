@@ -1,6 +1,6 @@
 """Concrete tools available to the agent, per persona."""
 
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +35,10 @@ class EscalateIn(_Input):
         "already tried, relevant order/branch ids. No passwords or card numbers.",
         min_length=10, max_length=1200,
     )
+
+
+# Escalation reasons, e.g. for the conversation-history filters.
+ESCALATION_CATEGORIES: tuple[str, ...] = get_args(EscalateIn.model_fields["category"].annotation)
 
 
 async def escalate_to_human(ctx: ToolContext, a: EscalateIn):

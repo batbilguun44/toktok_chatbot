@@ -69,6 +69,12 @@ class KnowledgeStore(Protocol):
     async def revision(self) -> str:
         """Changes whenever the published set changes (cheap; polled by replicas)."""
         ...
+    async def first_authors(self) -> dict[str, str]:
+        """doc_id -> who wrote its first version (the person who added the document)."""
+        ...
+    async def find_text(self, q: str, limit: int) -> list[DocVersion]:
+        """Published or open versions whose title or body contains `q` (case-insensitive)."""
+        ...
 
 
 def now() -> str:
@@ -111,6 +117,15 @@ class InMemoryKnowledgeStore:
 
     async def revision(self):
         return str(self._rev)
+
+    async def first_authors(self):
+        return {d: min(vs.values(), key=lambda v: v.version).author for d, vs in self.vers.items() if vs}
+
+    async def find_text(self, q, limit):
+        ql = q.lower()
+        hits = [v for vs in self.vers.values() for v in vs.values()
+                if v.state in ("published", *OPEN_STATES) and (ql in v.title.lower() or ql in v.body.lower())]
+        return hits[:limit]
 
 
 _V_COLS = ("doc_id, version, persona, title, body, tags, visibility, state, source, author, created_at, "
@@ -221,3 +236,19 @@ class PostgresKnowledgeStore:
         async with self.pool.connection() as conn:
             r = await (await conn.execute(f"SELECT count(*), max(updated_at) FROM {self.docs_t}")).fetchone()
         return f"{r[0]}:{r[1].isoformat() if r[1] else ''}"
+
+    async def first_authors(self):
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute(
+                f"SELECT DISTINCT ON (doc_id) doc_id, author FROM {self.vers_t} ORDER BY doc_id, version")).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    async def find_text(self, q, limit):
+        like = f"%{q}%"
+        async with self.pool.connection() as conn:
+            rows = await (await conn.execute(
+                f"""SELECT {_V_COLS} FROM {self.vers_t}
+                    WHERE state IN ('published', 'draft', 'in_review', 'rejected')
+                      AND (title ILIKE %s OR body ILIKE %s)
+                    ORDER BY updated_at DESC LIMIT %s""", (like, like, limit))).fetchall()
+        return [_row_to_version(r) for r in rows]

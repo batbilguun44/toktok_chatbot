@@ -9,6 +9,16 @@ export const STATE_MN: Record<string, string> = {
   draft: "Ноорог", in_review: "Хянагдаж буй", rejected: "Буцаагдсан", published: "Нийтлэгдсэн",
   superseded: "Хуучирсан",
 };
+// Why a conversation went to an operator (escalate_to_human categories).
+export const CATEGORY_MN: Record<string, string> = {
+  user_requested: "Хүн хүссэн", not_in_knowledge: "Мэдлэгт алга", needs_human_decision: "Шийдвэр хэрэгтэй",
+  incident: "Яаралтай", complaint: "Гомдол", account_security: "Аюулгүй байдал", sales_manager: "Борлуулалт",
+  technical_issue: "Техникийн",
+};
+// System authors: "git" = sample documents loaded from backend/knowledge/ on first start,
+// "default" = the built-in bot instructions. Show them as such instead of a person.
+export const personLabel = (p?: string | null) =>
+  p === "git" ? "Анхны жишээ" : p === "default" ? "Анхны заавар" : p ?? "—";
 export const pct = (v: number | null | undefined) => (v == null ? "—" : `${Math.round(v * 100)}%`);
 export const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString("mn-MN") : "—");
 

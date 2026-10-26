@@ -104,6 +104,46 @@ class ChatService:
         finally:
             await self.svc.sessions.release(session.session_id)
 
+    async def history(self, user: UserContext, session_id: str, limit: int = 100) -> dict[str, Any]:
+        """The user's own conversation so far, for the chat window after a page reload.
+
+        Only while the live session exists (same user and persona); texts are the stored, PII-masked ones.
+        """
+        session = await self._load_session(user, session_id, create=False)
+        empty = {"messages": [], "handoff": {"active": False, "last_id": 0}}
+        if not session:
+            return empty
+        log = await self.svc.repo.conversation_log(session_id)
+        if not log:
+            return empty
+        phone = self.svc.settings.operator_phone(user.persona)
+        msgs: list[dict[str, Any]] = []
+        last_id = 0
+        for e in log["events"]:
+            if e["kind"] == "turn":
+                msgs.append({"id": f"u-{e['turn_id']}", "role": "user", "text": e["user_text"]})
+                if e["bot_text"]:
+                    msgs.append({"id": e["turn_id"], "role": "assistant", "text": e["bot_text"],
+                                 "turn_id": e["turn_id"], "rating": e["rating"]})
+            elif e["kind"] == "escalation":
+                ticket = {"ticket_id": e["escalation_id"], "phone": phone, "mode": "inchat"}
+                last_bot = next((m for m in reversed(msgs) if m["role"] == "assistant"), None)
+                if last_bot is not None and "escalation" not in last_bot:
+                    last_bot["escalation"] = ticket
+            elif e["kind"] == "handoff":
+                msgs.append({"id": f"h{e['id']}", "role": e["sender"], "text": e["text"]})
+                if e["escalation_id"] == session.handoff_id:
+                    last_id = max(last_id, e["id"])
+        open_esc = await self.svc.handoff.is_open(session.handoff_id) if session.handoff_id else None
+        return {"messages": msgs[-limit:], "handoff": {"active": bool(open_esc), "last_id": last_id}}
+
+    async def close_handoff(self, user: UserContext, session_id: str) -> bool:
+        """User pressed "new chat" during an open operator handoff."""
+        session = await self._load_session(user, session_id, create=False)
+        if not session or not await self.svc.handoff.is_open(session.handoff_id):
+            return False
+        return await self.svc.handoff.user_left(session.handoff_id)
+
     async def handoff_updates(self, user: UserContext, session_id: str, after_id: int) -> dict[str, Any]:
         """Polled by the chat UI while an operator is handling the conversation."""
         session = await self._load_session(user, session_id, create=False)

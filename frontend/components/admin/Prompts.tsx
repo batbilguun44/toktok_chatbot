@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Me, staffFetch } from "@/lib/api";
-import { Badge, Diff, PERSONA_MN, STATE_MN, when } from "./common";
+import { Badge, Diff, PERSONA_MN, STATE_MN, personLabel, when } from "./common";
 
 type Version = {
   version: number; body: string; state: string; source: string; author: string; updated_at: string;
@@ -45,6 +45,22 @@ export default function Prompts({ me, onErr }: { me: Me; onErr: (e: string | nul
   }, [onErr]);
   useEffect(() => { load(persona, true); }, [load, persona]);
 
+  // Pick up review decisions made elsewhere; keep the text if it has unsaved edits.
+  const live = useRef({ persona, clean: true });
+  useEffect(() => {
+    const refresh = () => {
+      if (!document.hidden) load(live.current.persona, live.current.clean).catch(() => {});
+    };
+    const t = setInterval(refresh, 10_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [load]);
+
   async function act(fn: () => Promise<unknown>, ok: string) {
     try {
       await fn();
@@ -73,6 +89,7 @@ export default function Prompts({ me, onErr }: { me: Me; onErr: (e: string | nul
   const max = ov?.max_chars ?? 4000;
   const dirty = text !== ((openDraft ?? published)?.body ?? "");
   const base = `/api/admin/prompts/${persona}`;
+  live.current = { persona, clean: !dirty };
 
   return (
     <section className="prompts">
@@ -97,7 +114,7 @@ export default function Prompts({ me, onErr }: { me: Me; onErr: (e: string | nul
         <div className="kb-edit">
           <h3>{PERSONA_MN[persona]} — ботын заавар</h3>
           <div className="small muted">
-            {published && <>Нийтлэгдсэн: v{published.version} · {published.author}{published.reviewer ? ` → ${published.reviewer}` : ""} · {when(published.updated_at)}</>}
+            {published && <>Нийтлэгдсэн: v{published.version} · {personLabel(published.author)}{published.reviewer ? ` → ${published.reviewer}` : ""} · {when(published.updated_at)}</>}
             {openDraft && <div>Ноорог v{openDraft.version} · {STATE_MN[openDraft.state]} · {openDraft.author}</div>}
             {openDraft?.review_comment && <div className="err">Тайлбар: {openDraft.review_comment}</div>}
           </div>
@@ -165,7 +182,7 @@ export default function Prompts({ me, onErr }: { me: Me; onErr: (e: string | nul
                     <tr key={v.version}>
                       <td>v{v.version}</td>
                       <td><Badge kind={v.state}>{STATE_MN[v.state]}</Badge>{v.source === "default" ? " · анхны" : ""}</td>
-                      <td className="small">{v.author}{v.reviewer ? ` → ${v.reviewer}` : ""}<div className="muted">{when(v.updated_at)}</div></td>
+                      <td className="small">{personLabel(v.author)}{v.reviewer ? ` → ${v.reviewer}` : ""}<div className="muted">{when(v.updated_at)}</div></td>
                       <td>{canPublish && v.state === "superseded" && !openDraft && (
                         <button className="ghost" onClick={() => act(() => staffFetch(`${base}/rollback`,
                           { method: "POST", body: JSON.stringify({ to_version: v.version }) }), `v${v.version} руу буцаалаа`)}>Буцаах</button>)}</td>

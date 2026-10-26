@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from app.config import Settings
 from app.domain import UserContext
 from app.guardrails.checks import check_input, redact_for_logs, scrub_output
+from app.guardrails.translit import key_tokens
 from app.handoff.service import HandoffService
 from app.insights.judge import judge_turn, to_record
 from app.llm.base import LLMError, LLMProvider, TurnResult
@@ -232,6 +233,12 @@ def build_graph(svc: Services):
             emit("sources", {"documents": [{"id": i, "title": t} for i, t in sources.items()]})
 
         d = st.get("decision")
+        logged_sources = list(sources)
+        if not logged_sources and st.get("pack") and d and d.intent not in ATTRIBUTION_SKIP_INTENTS:
+            # Full-context mode reads the whole knowledge base, so nothing records which document an
+            # answer relied on. Attribute it to the closest documents by search (analytics only: per-doc
+            # usage, 👎 per doc, "open the source" from a conversation). Not shown to the user.
+            logged_sources = await attribute_sources(svc.kb, d.normalized_query or st["text"], st["user"].persona)
         latency = int((time.time() - st["started"]) * 1000)
         await svc.repo.log_turn(
             TurnLog(
@@ -242,7 +249,7 @@ def build_graph(svc: Services):
                 safety=st.get("blocked") or (d.safety if d else None),
                 # Tool outputs contain personal order data: keep them out of analytics storage.
                 tool_calls=[{k: v for k, v in t.items() if k != "output"} for t in result.tool_calls],
-                sources=list(sources), stop=result.stop, model=result.model, latency_ms=latency,
+                sources=logged_sources, stop=result.stop, model=result.model, latency_ms=latency,
                 usage=result.usage, escalated=bool(st.get("escalations")),
             )
         )
@@ -303,6 +310,24 @@ def _render_updates(changed: dict[str, tuple[str, str]], removed: list[str]) -> 
         parts.append("No longer valid (do not use): " + "; ".join(removed))
     parts.append("</knowledge_updates>")
     return "\n".join(parts)
+
+
+ATTRIBUTION_SKIP_INTENTS = ("greeting", "out_of_scope", "human_request")
+
+
+async def attribute_sources(kb: KnowledgeBase, text: str, persona: str) -> list[str]:
+    """Closest knowledge documents for a question: the best match plus a practically tied runner-up.
+
+    Short follow-ups ("Yes", "би яах вэ") carry no topic of their own and would match at random,
+    so a question needs at least two content words (4+ letters).
+    """
+    if sum(1 for t in key_tokens(text) if len(t) >= 4) < 2:
+        return []
+    hits = await kb.search(text, persona, k=3)
+    if not hits:
+        return []
+    top = hits[0].score
+    return list(dict.fromkeys(h.doc_id for h in hits[:2] if h.score >= top * 0.9))
 
 
 def _turn_context(st: TurnState) -> str:

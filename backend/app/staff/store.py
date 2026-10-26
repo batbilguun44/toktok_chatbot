@@ -12,10 +12,10 @@ ROLES = ("operator", "admin")
 # Operators answer handed-off chats and draft knowledge / bot-instruction changes;
 # an admin approves and publishes them (an admin may also publish their own change).
 PERMISSIONS: dict[str, set[str]] = {
-    "operator": {"handoff", "kb.read", "kb.edit"},
+    "operator": {"handoff", "kb.read", "kb.edit", "conversations.read"},
     "admin": {
         "kb.read", "kb.edit", "kb.publish", "metrics.read", "insights.read", "insights.run",
-        "handoff", "staff.manage", "audit.read",
+        "handoff", "staff.manage", "audit.read", "conversations.read", "conversations.export",
     },
 }
 
@@ -42,7 +42,9 @@ class StaffStore(Protocol):
     async def upsert(self, user: StaffUser) -> None: ...
     async def touch_login(self, email: str, name: str | None) -> None: ...
     async def audit(self, actor: str, action: str, target: str | None, detail: dict[str, Any] | None = None) -> None: ...
-    async def list_audit(self, limit: int) -> list[dict[str, Any]]: ...
+    async def list_audit(self, limit: int, actions: list[str] | None = None) -> list[dict[str, Any]]:
+        """Newest first; `actions` keeps only those action names."""
+        ...
 
 
 def _now() -> str:
@@ -74,8 +76,9 @@ class InMemoryStaffStore:
         self.audit_log.append({"id": len(self.audit_log) + 1, "actor": actor, "action": action, "target": target,
                                "detail": detail or {}, "created_at": _now(), "_ts": time.time()})
 
-    async def list_audit(self, limit: int) -> list[dict[str, Any]]:
-        return [{k: v for k, v in e.items() if k != "_ts"} for e in reversed(self.audit_log)][:limit]
+    async def list_audit(self, limit: int, actions: list[str] | None = None) -> list[dict[str, Any]]:
+        rows = [e for e in reversed(self.audit_log) if not actions or e["action"] in actions]
+        return [{k: v for k, v in e.items() if k != "_ts"} for e in rows][:limit]
 
 
 class PostgresStaffStore:
@@ -121,11 +124,12 @@ class PostgresStaffStore:
                 (actor, action, target, json.dumps(detail or {}, ensure_ascii=False, default=str)),
             )
 
-    async def list_audit(self, limit: int) -> list[dict[str, Any]]:
+    async def list_audit(self, limit: int, actions: list[str] | None = None) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT id, actor, action, target, detail, created_at FROM audit_log ORDER BY id DESC LIMIT %s",
-                (limit,),
+                "SELECT id, actor, action, target, detail, created_at FROM audit_log "
+                "WHERE %s::text[] IS NULL OR action = ANY(%s) ORDER BY id DESC LIMIT %s",
+                (actions, actions, limit),
             )).fetchall()
         return [{"id": r[0], "actor": r[1], "action": r[2], "target": r[3], "detail": r[4],
                  "created_at": r[5].isoformat()} for r in rows]
