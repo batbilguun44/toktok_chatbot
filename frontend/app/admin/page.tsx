@@ -52,6 +52,7 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
         <div className="small">
           {me.email} · {me.roles.join(", ")}{" "}
           {me.permissions.includes("handoff") && <a href="/operator">Оператор</a>}{" "}
+          <a href="/demo" target="_blank" rel="noopener noreferrer">Чат демо ↗</a>{" "}
           <button className="ghost" onClick={logout}>Гарах</button>
         </div>
       </header>
