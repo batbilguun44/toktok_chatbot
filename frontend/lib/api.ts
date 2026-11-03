@@ -104,7 +104,7 @@ export class ApiError extends Error {
   }
 }
 
-/** Staff requests use the HttpOnly session cookie set by SSO / dev login. */
+/** Staff requests use the HttpOnly session cookie set by SSO / password / dev login. */
 export async function staffFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const isForm = init?.body instanceof FormData;
   const res = await fetch(`${API_BASE}${path}`, {
@@ -127,13 +127,24 @@ export async function staffFetch<T>(path: string, init?: RequestInit): Promise<T
 }
 
 export type Me = { email: string; roles: string[]; permissions: string[]; via: string };
-export type AuthConfig = { sso_enabled: boolean; dev_login_enabled: boolean; roles: string[] };
+export type AuthConfig = {
+  sso_enabled: boolean;
+  dev_login_enabled: boolean;
+  password_login_enabled?: boolean;
+  roles: string[];
+};
 
 export const authApi = {
   config: () => staffFetch<AuthConfig>("/api/auth/config"),
   me: () => staffFetch<Me>("/api/auth/me"),
   devLogin: (email: string, roles: string[]) =>
     staffFetch("/api/auth/dev-login", { method: "POST", body: JSON.stringify({ email, roles }) }),
+  passwordLogin: (loginId: string, password: string) =>
+    staffFetch("/api/auth/password-login", { method: "POST", body: JSON.stringify({ login_id: loginId, password }) }),
+  setPassword: (loginId: string, password: string | null) =>
+    staffFetch(`/api/admin/staff/${encodeURIComponent(loginId)}/password`, {
+      method: "PUT", body: JSON.stringify({ password }),
+    }),
   logout: () => staffFetch("/api/auth/logout", { method: "POST" }),
   ssoUrl: (returnTo: string) => `${API_BASE}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`,
 };

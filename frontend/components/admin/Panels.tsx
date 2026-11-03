@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Me, staffFetch } from "@/lib/api";
+import { authApi, Me, staffFetch } from "@/lib/api";
 import { Badge, Card, PERSONA_MN, pct, when } from "./common";
 
 type Metrics = {
@@ -145,6 +145,8 @@ const ROLE_MN: Record<string, string> = { operator: "Оператор", admin: "
 export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
   const [rows, setRows] = useState<Staff[]>([]);
   const [form, setForm] = useState<{ email: string; roles: string[] }>({ email: "", roles: ["operator"] });
+  const [pw, setPw] = useState<Record<string, string>>({});
+  const [pwDone, setPwDone] = useState<string | null>(null);
   const load = useCallback(() => {
     staffFetch<Staff[]>("/api/admin/staff").then((x) => { setRows(x); onErr(null); }).catch((e) => onErr(String(e)));
   }, [onErr]);
@@ -158,13 +160,23 @@ export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
       onErr(String(e));
     }
   }
+  async function setPassword(email: string) {
+    try {
+      await authApi.setPassword(email, pw[email] ?? "");
+      setPw({ ...pw, [email]: "" });
+      setPwDone(email);
+      onErr(null);
+    } catch (e) {
+      onErr(String(e));
+    }
+  }
   const toggle = (roles: string[], r: string) => (roles.includes(r) ? roles.filter((x) => x !== r) : [...roles, r]);
   return (
     <section>
-      <p className="muted small">SSO-гоор нэвтрэх ажилтныг энд бүртгэнэ. Эрх: Оператор (чат), Засварлагч (ноорог),
+      <p className="muted small">Ажилтныг энд бүртгэж, нэвтрэх нэр + нууц үг (10+ тэмдэгт) эсвэл SSO-гоор нэвтрүүлнэ. Эрх: Оператор (чат), Засварлагч (ноорог),
         Батлагч (нийтлэх), Админ (бүгд).</p>
       <table>
-        <thead><tr><th>И-мэйл</th><th>Эрх</th><th>Сүүлд нэвтэрсэн</th><th /></tr></thead>
+        <thead><tr><th>Нэвтрэх нэр / И-мэйл</th><th>Эрх</th><th>Нууц үг</th><th>Сүүлд нэвтэрсэн</th><th /></tr></thead>
         <tbody>{rows.map((u) => (
           <tr key={u.email} className={u.active ? "" : "muted"}>
             <td>{u.email}<div className="small muted">{u.name}</div></td>
@@ -172,6 +184,16 @@ export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
               <label key={r} className="chk"><input type="checkbox" checked={u.roles.includes(r)}
                 onChange={() => save(u.email, toggle(u.roles, r), u.active)} /> {ROLE_MN[r]}</label>
             ))}</td>
+            <td>
+              <div className="row2">
+                <input type="password" placeholder="Шинэ нууц үг" aria-label={`${u.email} нууц үг`}
+                       autoComplete="new-password" value={pw[u.email] ?? ""}
+                       onChange={(e) => setPw({ ...pw, [u.email]: e.target.value })} />
+                <button className="ghost" disabled={(pw[u.email] ?? "").length < 10}
+                        onClick={() => setPassword(u.email)}>Хадгалах</button>
+              </div>
+              {pwDone === u.email && <div className="small muted">Нууц үг шинэчлэгдлээ.</div>}
+            </td>
             <td className="small">{when(u.last_login_at)}</td>
             <td><button className="ghost" onClick={() => save(u.email, u.roles, !u.active)}>{u.active ? "Хаах" : "Нээх"}</button></td>
           </tr>
@@ -179,13 +201,13 @@ export function StaffPanel({ onErr }: { onErr: (e: string | null) => void }) {
       </table>
       <h3>Ажилтан нэмэх</h3>
       <div className="row2 wrap">
-        <input placeholder="name@toktok.mn" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+        <input placeholder="Нэвтрэх нэр эсвэл name@toktok.mn" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
         {Object.keys(ROLE_MN).map((r) => (
           <label key={r} className="chk"><input type="checkbox" checked={form.roles.includes(r)}
             onChange={() => setForm({ ...form, roles: toggle(form.roles, r) })} /> {ROLE_MN[r]}</label>
         ))}
         <button onClick={() => { save(form.email.trim().toLowerCase(), form.roles); setForm({ email: "", roles: ["operator"] }); }}
-                disabled={!/^[^@\s]+@[^@\s]+$/.test(form.email) || !form.roles.length}>Нэмэх</button>
+                disabled={!/^[A-Za-z0-9._%+@-]{3,120}$/.test(form.email.trim()) || !form.roles.length}>Нэмэх</button>
       </div>
     </section>
   );

@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS staff_users (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login_at  TIMESTAMPTZ
 );
+-- ID/password login (scrypt hash; NULL = no password, SSO only).
+ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id          BIGSERIAL PRIMARY KEY,

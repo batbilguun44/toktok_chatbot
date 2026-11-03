@@ -27,6 +27,9 @@ export default function StaffGate({
   const [error, setError] = useState<string | null>(null);
   const [devEmail, setDevEmail] = useState("admin@toktok.mn");
   const [devRole, setDevRole] = useState("admin");
+  const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -58,6 +61,24 @@ export default function StaffGate({
     }
   }
 
+  async function passwordLogin(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await authApi.passwordLogin(loginId.trim(), password);
+      setPassword("");
+      setError(null);
+      await refresh();
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : 0;
+      setError(status === 401 ? "Нэвтрэх нэр эсвэл нууц үг буруу байна."
+        : status === 429 ? "Хэт олон оролдлого хийлээ. Нэг минут хүлээгээд дахин оролдоно уу."
+        : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function logout() {
     await authApi.logout().catch(() => {});
     setMe(null);
@@ -74,6 +95,15 @@ export default function StaffGate({
           <a className="button" href={authApi.ssoUrl(returnTo)}>
             Байгууллагын бүртгэлээр нэвтрэх (SSO)
           </a>
+        )}
+        {cfg?.password_login_enabled && (
+          <form className="dev-login" onSubmit={passwordLogin}>
+            <input value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="Нэвтрэх нэр"
+                   aria-label="Нэвтрэх нэр" autoComplete="username" required />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                   placeholder="Нууц үг" aria-label="Нууц үг" autoComplete="current-password" required />
+            <button type="submit" disabled={busy}>{busy ? "Шалгаж байна…" : "Нэвтрэх"}</button>
+          </form>
         )}
         {cfg?.dev_login_enabled && (
           <form className="dev-login" onSubmit={devLogin}>

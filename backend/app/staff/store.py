@@ -41,6 +41,8 @@ class StaffStore(Protocol):
     async def list_all(self) -> list[StaffUser]: ...
     async def upsert(self, user: StaffUser) -> None: ...
     async def touch_login(self, email: str, name: str | None) -> None: ...
+    async def get_password_hash(self, email: str) -> str | None: ...
+    async def set_password_hash(self, email: str, password_hash: str | None) -> None: ...
     async def audit(self, actor: str, action: str, target: str | None, detail: dict[str, Any] | None = None) -> None: ...
     async def list_audit(self, limit: int, actions: list[str] | None = None) -> list[dict[str, Any]]:
         """Newest first; `actions` keeps only those action names."""
@@ -54,6 +56,7 @@ def _now() -> str:
 class InMemoryStaffStore:
     def __init__(self) -> None:
         self.users: dict[str, StaffUser] = {}
+        self.password_hashes: dict[str, str] = {}
         self.audit_log: list[dict[str, Any]] = []
 
     async def get(self, email: str) -> StaffUser | None:
@@ -71,6 +74,15 @@ class InMemoryStaffStore:
         if u:
             u.last_login_at = _now()
             u.name = u.name or name
+
+    async def get_password_hash(self, email: str) -> str | None:
+        return self.password_hashes.get(email.lower())
+
+    async def set_password_hash(self, email: str, password_hash: str | None) -> None:
+        if password_hash is None:
+            self.password_hashes.pop(email.lower(), None)
+        else:
+            self.password_hashes[email.lower()] = password_hash
 
     async def audit(self, actor, action, target, detail=None) -> None:
         self.audit_log.append({"id": len(self.audit_log) + 1, "actor": actor, "action": action, "target": target,
@@ -116,6 +128,18 @@ class PostgresStaffStore:
                 "UPDATE staff_users SET last_login_at = now(), name = COALESCE(name, %s) WHERE email = %s",
                 (name, email.lower()),
             )
+
+    async def get_password_hash(self, email: str) -> str | None:
+        async with self.pool.connection() as conn:
+            r = await (await conn.execute(
+                "SELECT password_hash FROM staff_users WHERE email = %s", (email.lower(),)
+            )).fetchone()
+        return r[0] if r else None
+
+    async def set_password_hash(self, email: str, password_hash: str | None) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE staff_users SET password_hash = %s WHERE email = %s",
+                               (password_hash, email.lower()))
 
     async def audit(self, actor, action, target, detail=None) -> None:
         async with self.pool.connection() as conn:
