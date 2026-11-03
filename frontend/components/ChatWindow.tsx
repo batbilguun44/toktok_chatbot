@@ -2,6 +2,13 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { chatHistory, closeHandoff, pollHandoff, sendFeedback, streamChat } from "@/lib/api";
+
+// Local message ids (React keys only). crypto.randomUUID exists only in secure contexts
+// (HTTPS / localhost), so fall back to getRandomValues, which works over plain HTTP too.
+function localId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 import RichText from "./RichText";
 
 type Msg = {
@@ -119,11 +126,11 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
     if (!text.trim() || busy) return;
     setBusy(true);
     setInput("");
-    const botId = crypto.randomUUID();
+    const botId = localId();
     let liveHandoff = false;
     setMessages((ms) => [
       ...ms,
-      { id: crypto.randomUUID(), role: "user", text },
+      { id: localId(), role: "user", text },
       { id: botId, role: "assistant", text: "", status: "Бодож байна…" },
     ]);
     try {

@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-// Local entry point: the popup demo as TokTok's sites will show it.
-// The full-page chat demo moved to /demo.
+// Entry point: the full-page chat demo. The popup demo (as TokTok's sites will show it)
+// stays at /widget-demo.html.
 export default function Home() {
-  redirect("/widget-demo.html");
+  redirect("/demo");
 }

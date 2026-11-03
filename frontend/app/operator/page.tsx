@@ -117,6 +117,7 @@ function Console({ me, logout }: { me: Me; logout: () => void }) {
       <header className="admin-header">
         <h1>Операторын самбар</h1>
         <div className="small">{me.email} {me.permissions.includes("staff.manage") && <a href="/admin">Админ</a>}{" "}
+          <a href="/demo" target="_blank" rel="noopener noreferrer">Чат демо ↗</a>{" "}
           {alerts.permission === "default" && (
             <button className="ghost" onClick={alerts.enable}>🔔 Мэдэгдэл асаах</button>
           )}{" "}
