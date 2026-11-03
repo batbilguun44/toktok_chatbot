@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     staff_session_secret: str = "change-me-session"
     staff_session_hours: int = 12
     frontend_base_url: str = "http://localhost:3000"
+    # ID/password login for staff (accounts and passwords are managed in the admin UI;
+    # create the first admin with `python -m scripts.set_password <id> --role admin`).
+    password_login: bool = False
+    # The open dev login (any id, any role) is on outside ENV=prod unless this is false.
+    dev_login: bool = True
+    login_attempts_per_minute: int = 10  # per client IP and per login id
     cookie_secure: bool = False  # true behind HTTPS (forced in prod)
 
     # --- Security --------------------------------------------------------
@@ -141,7 +147,7 @@ class Settings(BaseSettings):
 
     @property
     def dev_login_enabled(self) -> bool:
-        return self.env != "prod"
+        return self.env != "prod" and self.dev_login
 
     def operator_phone(self, persona: str) -> str:
         return {

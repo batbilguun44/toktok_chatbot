@@ -1,5 +1,6 @@
-"""Staff login (OIDC SSO, dev login), logout, current principal, staff admin, audit log."""
+"""Staff login (OIDC SSO, ID/password, dev login), logout, current principal, staff admin, audit log."""
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import container, current_staff, require
 from app.container import Container
+from app.staff.passwords import hash_password, password_problem, verify_password
 from app.staff.auth import LOGIN_COOKIE, SESSION_COOKIE, AuthError, Principal, email_from_claims
 from app.staff.store import ROLES, StaffUser, permissions_for
 
@@ -38,7 +40,8 @@ async def _issue_session(c: Container, user: StaffUser, via: str, return_to: str
 
 @router.get("/config")
 async def auth_config(c: Container = Depends(container)):
-    return {"sso_enabled": c.settings.sso_enabled, "dev_login_enabled": c.settings.dev_login_enabled, "roles": ROLES}
+    return {"sso_enabled": c.settings.sso_enabled, "dev_login_enabled": c.settings.dev_login_enabled,
+            "password_login_enabled": c.settings.password_login, "roles": ROLES}
 
 
 @router.get("/login")
@@ -98,6 +101,31 @@ async def dev_login(body: DevLoginIn, c: Container = Depends(container)):
     return await _issue_session(c, user, "dev", None, redirect=False)
 
 
+class PasswordLoginIn(BaseModel):
+    login_id: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=256)
+
+
+@router.post("/password-login")
+async def password_login(body: PasswordLoginIn, request: Request, c: Container = Depends(container)):
+    if not c.settings.password_login:
+        raise HTTPException(404)
+    login_id = body.login_id.strip().lower()
+    limit = c.settings.login_attempts_per_minute
+    ip = request.client.host if request.client else "unknown"
+    if limit and max(await c.services.sessions.hit_rate(f"login:ip:{ip}"),
+                     await c.services.sessions.hit_rate(f"login:id:{login_id}")) > limit:
+        raise HTTPException(429, "too many login attempts, wait a minute")
+    user = await c.staff.get(login_id)
+    stored = await c.staff.get_password_hash(login_id) if user else None
+    ok = await asyncio.to_thread(verify_password, body.password, stored)  # scrypt: keep the loop free
+    if not ok or not user or not user.active:
+        await c.staff.audit(login_id, "login.denied", None, {"via": "password", "ip": ip,
+                            "reason": "inactive" if ok and user else "bad_credentials"})
+        raise HTTPException(401, "invalid id or password")
+    return await _issue_session(c, user, "password", None, redirect=False)
+
+
 @router.post("/logout")
 async def logout(c: Container = Depends(container)):
     resp = JSONResponse({"ok": True})
@@ -132,6 +160,25 @@ async def upsert_staff(email: str, body: StaffIn, p: Principal = Depends(require
     await c.staff.upsert(StaffUser(email=email, name=body.name, roles=list(body.roles), active=body.active))
     await c.staff.audit(p.email, "staff.upsert", email, {
         "before": before.__dict__ if before else None, "roles": body.roles, "active": body.active})
+    return {"ok": True}
+
+
+class PasswordIn(BaseModel):
+    password: str | None = Field(default=None, max_length=256)  # null = remove (SSO only)
+
+
+@staff_admin.put("/staff/{email}/password")
+async def set_staff_password(email: str, body: PasswordIn, p: Principal = Depends(require("staff.manage")),
+                             c: Container = Depends(container)):
+    email = email.lower()
+    if not await c.staff.get(email):
+        raise HTTPException(404, "staff member not found")
+    if body.password is not None and (problem := password_problem(body.password)):
+        raise HTTPException(400, problem)
+    hashed = await asyncio.to_thread(hash_password, body.password) if body.password is not None else None
+    await c.staff.set_password_hash(email, hashed)
+    await c.staff.audit(p.email, "staff.password_set" if body.password is not None else "staff.password_removed",
+                        email)
     return {"ok": True}
 
 
