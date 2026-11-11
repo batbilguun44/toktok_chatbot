@@ -6,6 +6,7 @@ import Conversations from "@/components/admin/Conversations";
 import Knowledge from "@/components/admin/Knowledge";
 import Prompts from "@/components/admin/Prompts";
 import Review from "@/components/admin/Review";
+import Settings from "@/components/admin/Settings";
 import StaffGate from "@/components/StaffGate";
 import { Me, staffFetch } from "@/lib/api";
 
@@ -17,6 +18,7 @@ const TABS = [
   { id: "prompts", label: "Ботын заавар", perm: "kb.read" },
   { id: "improve", label: "Сайжруулалт", perm: "insights.read" },
   { id: "staff", label: "Ажилтнууд", perm: "staff.manage" },
+  { id: "settings", label: "Тохиргоо", perm: "settings.manage" },
   { id: "audit", label: "Аудит", perm: "audit.read" },
 ] as const;
 
@@ -72,6 +74,7 @@ function AdminShell({ me, logout }: { me: Me; logout: () => void }) {
       {tab === "prompts" && <Prompts me={me} onErr={onErr} />}
       {tab === "improve" && <ImprovePanel me={me} onErr={onErr} />}
       {tab === "staff" && <StaffPanel onErr={onErr} />}
+      {tab === "settings" && <Settings onErr={onErr} />}
       {tab === "audit" && <AuditPanel onErr={onErr} />}
     </main>
   );

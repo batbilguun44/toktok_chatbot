@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import container, require
+from app.app_settings import PHONE_PERSONAS, PHONE_RE, PHONES_KEY, load_phones
 from app.cms.preview import preview_answer
 from app.cms.quality import CONFLICT_CHECK_MAX, Candidate, find_conflicts, find_similar
 from app.cms.service import CMSError, DraftInput, parse_upload
@@ -400,6 +401,44 @@ async def prompts_preview(body: InstructionsPreviewIn, _: Principal = Depends(re
                           c: Container = Depends(container)):
     return await preview_answer(c.services, await c.cms.published_docs(), body.persona, body.question, None,
                                 instructions=body.body)
+
+
+# ---------------------------------------------------------------- settings
+# Operator phone numbers shown to users on handoff. Saved values override OPERATOR_PHONE_* from .env
+# and apply to new bot answers at once (no restart); an empty value goes back to the .env default.
+def _phones_view(c: Container, row: dict | None) -> dict:
+    saved = ((row or {}).get("value") or {})
+    return {
+        "phones": {p: {"value": c.settings.operator_phone(p), "saved": saved.get(p) or "",
+                       "default": c.settings.default_operator_phone(p)} for p in PHONE_PERSONAS},
+        "updated_by": (row or {}).get("updated_by"), "updated_at": (row or {}).get("updated_at"),
+    }
+
+
+@admin.get("/settings/phones")
+async def phones_get(_: Principal = Depends(require("settings.manage")), c: Container = Depends(container)):
+    return _phones_view(c, await c.app_settings.get(PHONES_KEY))
+
+
+class PhonesIn(BaseModel):
+    driver: str = Field(default="", max_length=30)
+    client: str = Field(default="", max_length=30)
+    customer: str = Field(default="", max_length=30)
+
+
+@admin.put("/settings/phones")
+async def phones_put(body: PhonesIn, p: Principal = Depends(require("settings.manage")),
+                     c: Container = Depends(container)):
+    new = {k: v.strip() for k, v in body.model_dump().items()}
+    for persona, v in new.items():
+        if v and not PHONE_RE.match(v):
+            raise HTTPException(400, f"{persona}: утасны дугаар буруу байна (зөвхөн тоо, зай, -, +)")
+    before = await load_phones(c.app_settings)
+    await c.app_settings.set(PHONES_KEY, new, p.email)
+    await c.reload_phones()
+    await c.staff.audit(p.email, "settings.phones", PHONES_KEY,
+                        {"before": before, "after": {k: v for k, v in new.items() if v}})
+    return _phones_view(c, await c.app_settings.get(PHONES_KEY))
 
 
 # ------------------------------------------------------------- conversations

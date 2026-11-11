@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.app_settings import (AppSettingsStore, InMemoryAppSettingsStore, PostgresAppSettingsStore,
+                               load_phones)
 from app.cms.service import CMSService, InstructionsService
 from app.cms.store import InMemoryKnowledgeStore, KnowledgeStore, PostgresKnowledgeStore
 from app.config import Settings
@@ -41,6 +43,7 @@ class Container:
     cms: CMSService = None  # type: ignore[assignment]
     prompts: InstructionsService = None  # type: ignore[assignment]
     chat: ChatService = None  # type: ignore[assignment]
+    app_settings: AppSettingsStore = None  # type: ignore[assignment]
     _closers: list[Any] = field(default_factory=list)
     _kb_revision: str | None = None
     _kb_checked_at: float = 0.0
@@ -69,6 +72,10 @@ class Container:
         if await self.prompts.store.revision() != self._prompt_revision:
             log.info("bot instructions revision changed; reloading")
             await self.reload_instructions()
+        await self.reload_phones()  # pick up phones an admin changed through another replica
+
+    async def reload_phones(self) -> None:
+        self.settings.set_phone_overrides(await load_phones(self.app_settings))
 
     async def reload_instructions(self) -> None:
         rev = await self.prompts.store.revision()
@@ -161,11 +168,13 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         await pg.init_schema()
         repo, staff, kstore = pg, PostgresStaffStore(pool), PostgresKnowledgeStore(pool)
         pstore = PostgresKnowledgeStore(pool, prefix="prompt")
+        app_settings: AppSettingsStore = PostgresAppSettingsStore(pool)
         if migrated := await kstore.migrate_legacy():
             log.info("migrated %d legacy admin-edited docs into the CMS", migrated)
     else:
         repo, staff, kstore = InMemoryRepository(), InMemoryStaffStore(), InMemoryKnowledgeStore()
         pstore = InMemoryKnowledgeStore()
+        app_settings = InMemoryAppSettingsStore()
 
     sessions: SessionStore
     if s.redis_url:
@@ -205,7 +214,7 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
             if s.sso_enabled else None)
 
     c = Container(settings=s, services=services, staff=staff, signer=Signer(s.staff_session_secret), oidc=oidc,
-                  _closers=closers)
+                  app_settings=app_settings, _closers=closers)
     c.cms = CMSService(kstore, staff, on_publish=c.reindex, four_eyes=s.cms_four_eyes)
     c.prompts = InstructionsService(pstore, staff, on_publish=c.reload_instructions, four_eyes=s.cms_four_eyes)
     c.chat = ChatService(services, ensure_fresh=c.ensure_fresh)
@@ -215,4 +224,5 @@ async def build_container(s: Settings, *, llm: LLMProvider | None = None) -> Con
         log.info("seeded default bot instructions for %d personas", seeded)
     await c.reindex()
     await c.reload_instructions()
+    await c.reload_phones()
     return c

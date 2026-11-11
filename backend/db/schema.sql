@@ -173,3 +173,11 @@ CREATE TABLE IF NOT EXISTS insight_runs (
     clusters    JSONB NOT NULL DEFAULT '[]',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Settings the operation team edits in /admin (e.g. operator phones); overrides the .env defaults.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT PRIMARY KEY,
+    value       JSONB NOT NULL,
+    updated_by  TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

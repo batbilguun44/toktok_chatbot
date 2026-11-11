@@ -56,7 +56,7 @@ class FakeProvider:
         elif intent == "human_request" and "escalate_to_human" in names:
             r = await call("escalate_to_human", {"category": "user_requested",
                                                  "summary": f"Хэрэглэгч оператортой холбогдохыг хүссэн: {user_text}"})
-            reply = f"Таны хүсэлтийг {r['ticket_id']} дугаартайгаар бүртгэлээ. Оператор: {r['operator_phone']}."
+            reply = f"Таны хүсэлтийг операторт шилжүүллээ. Яаралтай үед: {r['operator_phone']}."
         elif intent in ("order_status", "order_eta") and "list_my_recent_orders" in names:
             orders = (await call("list_my_recent_orders", {}))["orders"]
             active = [o for o in orders if o["status"] not in ("delivered", "cancelled")]

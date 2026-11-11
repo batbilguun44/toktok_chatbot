@@ -251,8 +251,7 @@ export default function ChatWindow({ token, persona, title, onClose, onOperatorM
               {m.escalation && (
                 <div className="escalation">
                   <div>
-                    {m.escalation.mode === "inchat" ? "Оператор энэ чатаар хариулна" : "Оператор руу шилжүүллээ"} ·{" "}
-                    <b>{m.escalation.ticket_id}</b>
+                    {m.escalation.mode === "inchat" ? "Оператор энэ чатаар хариулна" : "Оператор руу шилжүүллээ"}
                   </div>
                   <a className="call" href={`tel:${m.escalation.phone.replace(/[^0-9+]/g, "")}`}>
                     📞 {m.escalation.phone} руу залгах

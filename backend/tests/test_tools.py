@@ -85,10 +85,12 @@ async def test_escalation_creates_ticket_and_emits_event(container, ctx_factory)
     ctx, events = await ctx_factory("demo-driver")
     _, body = await run(container, ctx, "escalate_to_human",
                         {"category": "incident", "summary": "Хүргэгч бага зэргийн осолд орсон, захиалга O-24001."})
-    assert body["ticket_id"].startswith("esc_") and body["operator_phone"] == container.settings.operator_phone_driver
-    assert ("escalation", {"ticket_id": body["ticket_id"], "phone": body["operator_phone"], "category": "incident",
+    assert body["operator_phone"] == container.settings.operator_phone_driver
+    assert "ticket_id" not in body  # the model never sees the internal id, so it cannot show it to the user
+    ticket = ctx.session.handoff_id  # next user messages go to the operator
+    assert ticket.startswith("esc_")
+    assert ("escalation", {"ticket_id": ticket, "phone": body["operator_phone"], "category": "incident",
                            "mode": "inchat"}) in events
-    assert ctx.session.handoff_id == body["ticket_id"]  # next user messages go to the operator
     assert ctx.session.escalated
     rows = await container.services.repo.list_escalations("queued", 10)
     assert rows[0]["category"] == "incident"
