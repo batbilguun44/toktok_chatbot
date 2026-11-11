@@ -16,6 +16,7 @@ PERMISSIONS: dict[str, set[str]] = {
     "admin": {
         "kb.read", "kb.edit", "kb.publish", "metrics.read", "insights.read", "insights.run",
         "handoff", "staff.manage", "audit.read", "conversations.read", "conversations.export",
+        "settings.manage",
     },
 }
 

@@ -43,7 +43,7 @@ ESCALATION_CATEGORIES: tuple[str, ...] = get_args(EscalateIn.model_fields["categ
 
 async def escalate_to_human(ctx: ToolContext, a: EscalateIn):
     if ctx.session.handoff_id:
-        return {"status": "already_with_operator", "ticket_id": ctx.session.handoff_id}
+        return {"status": "already_with_operator"}
     inchat = ctx.settings.handoff_mode == "inchat" and ctx.handoff is not None
     mode = "inchat" if inchat else "phone"
     ticket = await ctx.repo.create_escalation(
@@ -56,12 +56,13 @@ async def escalate_to_human(ctx: ToolContext, a: EscalateIn):
         ctx.session.handoff_id = ticket
         await ctx.handoff.started(await ctx.repo.get_escalation(ticket), ctx.session.recent[-12:])
     ctx.emit("escalation", {"ticket_id": ticket, "phone": phone, "category": a.category, "mode": mode})
+    # The ticket id stays internal (operator console, history search); the user never needs it.
     if inchat:
         note = ("An operator will continue in THIS chat. Tell the user briefly that they can keep writing "
-                "here and an operator will reply; give the ticket number; the phone is only for urgent cases.")
+                "here and an operator will reply; the phone is only for urgent cases.")
     else:
-        note = "Tell the user the ticket number and the phone number; an operator will follow up."
-    return {"ticket_id": ticket, "operator_phone": phone, "mode": mode, "note": note}
+        note = "Tell the user the phone number; an operator will follow up."
+    return {"status": "handed_to_operator", "operator_phone": phone, "mode": mode, "note": note}
 
 
 # ---------------------------------------------------------------- customer
@@ -196,8 +197,8 @@ def build_registry(personal_data: bool = True) -> ToolRegistry:
               "user type. Use for any policy, fee, procedure or app-usage question.",
               SearchKnowledgeIn, search_knowledge, ALL, "Мэдээлэл хайж байна…"),
             T("escalate_to_human",
-              "Hand the conversation to a human operator: creates a support ticket and returns the "
-              "operator phone. Use when the user asks for a person, when verified knowledge does "
+              "Hand the conversation to a human operator: creates an internal support ticket and returns "
+              "the operator phone. Use when the user asks for a person, when verified knowledge does "
               "not cover the question, or when a human decision is required.",
               EscalateIn, escalate_to_human, ALL, "Оператор руу шилжүүлж байна…"),
             T("list_my_recent_orders", "List the signed-in customer's 5 most recent orders.",

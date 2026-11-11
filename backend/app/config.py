@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -149,12 +150,22 @@ class Settings(BaseSettings):
     def dev_login_enabled(self) -> bool:
         return self.env != "prod" and self.dev_login
 
-    def operator_phone(self, persona: str) -> str:
+    # Phones an admin set in /admin (persona -> number); they win over the .env values above.
+    _phone_overrides: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def default_operator_phone(self, persona: str) -> str:
+        """The .env / built-in number, used when no admin override is set."""
         return {
             "driver": self.operator_phone_driver,
             "client": self.operator_phone_client,
             "customer": self.operator_phone_customer,
         }[persona]
+
+    def operator_phone(self, persona: str) -> str:
+        return self._phone_overrides.get(persona) or self.default_operator_phone(persona)
+
+    def set_phone_overrides(self, phones: dict[str, str]) -> None:
+        self._phone_overrides = {p: v for p, v in phones.items() if v}
 
 
 @lru_cache
